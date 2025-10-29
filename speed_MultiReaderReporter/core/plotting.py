@@ -41,7 +41,9 @@ def save_grouped_checkup_plot(cell: str,
                               run_label: str,
                               segments: list[tuple],   # [(df_seg, group_label), ...]
                               out_dir: Path,
-                              max_points_per_segment: int = 5000):
+                              max_points_per_segment: int = 5000,
+                              occurrence_index: int | None = None,
+                              occurrence_total: int | None = None):
     """
     Visual check: plot a single checkup broken into groups (segments).
     Plots current vs absolute time; one color per segment with labels.
@@ -72,13 +74,26 @@ def save_grouped_checkup_plot(cell: str,
 
     plt.xlabel("Zeit (absolute)")
     plt.ylabel("Spannung [V]")
-    plt.title(f"Cell: {cell} — Checkup grouped (Spannung): {run_label}")
+    display_label = run_label
+    if occurrence_index is not None:
+        if occurrence_total is not None and occurrence_total > 1:
+            display_label = f"{run_label} #{occurrence_index}/{occurrence_total}"
+        else:
+            display_label = f"{run_label} #{occurrence_index}"
+    plt.title(f"Cell: {cell} — Checkup grouped (Spannung): {display_label}")
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=8, ncol=4, loc="upper center",
                bbox_to_anchor=(0.5, -0.18), frameon=False)
     plt.tight_layout(rect=[0, 0.20, 1, 1])
 
-    fname = f"{_sanitize(run_label)}_grouped_voltage.png"
+    base_name = _sanitize(run_label) or "checkup"
+    if occurrence_index is not None and (occurrence_total or 0) > 1:
+        suffix = f"_{occurrence_index:02d}of{occurrence_total}"
+    elif occurrence_index is not None:
+        suffix = f"_{occurrence_index:02d}"
+    else:
+        suffix = ""
+    fname = f"{base_name}{suffix}_grouped_voltage.png"
     out_path = out_dir / fname
     plt.savefig(out_path, dpi=160)
     plt.close()

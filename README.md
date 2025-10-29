@@ -21,6 +21,7 @@ SPEED MultiReaderReporter automatically:
 - Generates:
   - Strom-vs-Zeit plots for total, checkup, and cycling data
   - Throughput and current statistics (`report.csv` or `.mat`)
+  - Optional **checkup-segment breakdowns** that split pauses into voltage-defined groups
   - Optional **SoH plots**: discharge capacity (step-19) vs cumulative charge throughput
 
 Everything — input locations, classification rules, report format, and thresholds — is controlled through a single YAML configuration file.
@@ -108,6 +109,8 @@ out/<CELL_NAME>/
   checkup/
     strom_vs_zeit.png
     report.csv or report.mat
+    groups/
+      strom_vs_zeit_[group-index].png         # if grouping plots are enabled
     soh_discharge_capacity_vs_throughput.csv
     soh_discharge_capacity_vs_throughput.png
   cycling/
@@ -133,6 +136,29 @@ The classification logic uses a combination of:
 4. **Otherwise** — it’s a *cycling* run.
 
 These parameters can all be customized in `config.yaml` under the `classification:` section.
+
+---
+
+## 🔀 Checkup Grouping & Segment Reports
+
+Some checkups contain repeated pause/charge cycles that need to be evaluated independently.
+The `checkup_grouping` section in `config.yaml` enables automatic segmentation so plots and
+reports reflect those finer-grained groups.
+
+| Key | Description |
+| --- | ----------- |
+| `mode` | `off` (default), `plot`, `report`, or `both`. Controls whether segmentation is calculated, plotted, and/or included in reports. |
+| `pause_label` | Pause state label to anchor each group. Defaults to `PAU`. |
+| `min_points` | Minimum rows per segment; shorter pauses are merged forward. |
+| `voltage_windows` | Acceptable pause-voltage ranges (defaults to `[[1.9, 2.1], [3.55, 3.65]]`). Groups only start when the first pause inside a new step lands within one of these windows. |
+| `require_step_change` | When `true`, segments only start at step changes; the first pause within the new step is selected automatically. |
+| `plot_max_points_per_segment` | Optional decimation for faster plotting of large pauses. |
+
+Additional behavior:
+
+* Checkups whose labels contain `glu` or `aer` are intentionally left unsplit so they retain their legacy behavior.
+* Segment plots inherit the parent checkup name, and when multiple runs share a name the files are numbered to avoid overwriting.
+* When grouping is enabled for reports, each segment contributes its own row alongside the per-checkup totals in both CSV and MATLAB exports.
 
 ---
 

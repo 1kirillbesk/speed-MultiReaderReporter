@@ -1,6 +1,6 @@
 # speed_MultiReaderReporter/core/pipeline.py
 from __future__ import annotations
-from collections import defaultdict
+from collections import defaultdict, Counter
 from pathlib import Path
 import pandas as pd
 
@@ -42,24 +42,52 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         mat_var = str(cfg.get("reports", {}).get("mat_variable", "report"))
 
         write_report(total_list, cell_dir / "total" / "report", f"{cell} total", fmt=fmt, mat_variable=mat_var)
-        write_report(checkup_list, cell_dir / "checkup" / "report", f"{cell} checkup", fmt=fmt, mat_variable=mat_var)
         write_report(cycling_list, cell_dir / "cycling" / "report", f"{cell} cycling", fmt=fmt, mat_variable=mat_var)
 
         # --- optional grouped report + per-checkup grouped plots ---
         prep = prepare_grouping(cfg)  # returns None when mode = off
-        if prep is not None:
+        per_run: list[tuple[str, list[tuple[pd.DataFrame, str]]]] = []
+        grouped_flat: list[tuple[pd.DataFrame, str, str]] = []
+        if prep is not None and checkup_list:
             # Compute segments once
             per_run, grouped_flat = compute_grouped_segments(checkup_list, prep.cfg)
 
+        # Checkup report (with grouping when requested)
+        if prep is not None and prep.do_report and per_run:
+            write_report(
+                checkup_list,
+                cell_dir / "checkup" / "report",
+                f"{cell} checkup",
+                fmt=fmt,
+                mat_variable=mat_var,
+                grouped_runs=per_run,
+            )
+        else:
+            write_report(
+                checkup_list,
+                cell_dir / "checkup" / "report",
+                f"{cell} checkup",
+                fmt=fmt,
+                mat_variable=mat_var,
+            )
+
+        if prep is not None and per_run:
             # Optional per-checkup debug plots
             if prep.do_plots:
+                counts = Counter(run_label for run_label, _ in per_run)
+                seen: dict[str, int] = defaultdict(int)
                 for run_label, segs in per_run:
+                    seen[run_label] += 1
+                    total = counts[run_label]
+                    occurrence = seen[run_label]
                     save_grouped_checkup_plot(
                         cell=cell,
                         run_label=run_label,
                         segments=segs,
                         out_dir=cell_dir / "checkup" / "grouped_plots",
                         max_points_per_segment=prep.max_points_per_segment,
+                        occurrence_index=occurrence if total > 1 else None,
+                        occurrence_total=total if total > 1 else None,
                     )
 
             # Optional grouped report
