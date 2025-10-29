@@ -10,9 +10,8 @@ class GroupCfg:
     pause_label: str = "PAU"
     min_points: int = 5
     require_step_change: bool = True
-    voltage_low: float | None = None
-    voltage_high: float | None = None
-    voltage_windows: tuple[tuple[float, float], ...] = DEFAULT_VOLTAGE_WINDOWS
+    voltage_low: float = 2.0
+    voltage_high: float = 3.6
 
 def _where_step_changes(step: pd.Series) -> np.ndarray:
     s = pd.to_numeric(step, errors="coerce")
@@ -29,9 +28,7 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
         return []
 
     # candidate starts: positions with pause label that coincide with a step change boundary
-    state_vals_raw = df["state"].astype(str).fillna("")
-    state_vals = np.array([s.strip().upper() for s in state_vals_raw])
-    pause_label_norm = str(cfg.pause_label).strip().upper()
+    state_vals = df["state"].astype(str).fillna("").to_numpy()
 
     if cfg.require_step_change:
         # boundaries indicate the first index of a new step (including 0)
@@ -42,42 +39,11 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
         # when step enforcement is disabled, allow any row as potential start
         boundaries = np.arange(N, dtype=int)
 
-    if "voltage_V" in df.columns:
-        voltage_vals = pd.to_numeric(df["voltage_V"], errors="coerce").to_numpy()
-    else:
-        voltage_vals = np.full(N, np.nan)
-
-    def _is_valid_voltage(v: float) -> bool:
-        if not np.isfinite(v):
-            return False
-        windows = getattr(cfg, "voltage_windows", ()) or ()
-        if windows:
-            for low, high in windows:
-                lo = -np.inf if low is None else float(low)
-                hi = np.inf if high is None else float(high)
-                if lo > hi:
-                    lo, hi = hi, lo
-                if lo <= v <= hi:
-                    return True
-            return False
-
-        low_set = cfg.voltage_low is not None
-        high_set = cfg.voltage_high is not None
-        if not low_set and not high_set:
-            return True
-
-        low = cfg.voltage_low if low_set else -np.inf
-        high = cfg.voltage_high if high_set else np.inf
-        return v < low or v > high
-
     starts = []
     for idx in boundaries:
         if idx >= N:
             continue
-        if state_vals[idx] == pause_label_norm:
-            v = voltage_vals[idx] if idx < len(voltage_vals) else np.nan
-            if not _is_valid_voltage(v):
-                continue
+        if state_vals[idx] == cfg.pause_label:
             if not starts or idx != starts[-1]:
                 starts.append(int(idx))
 
@@ -195,12 +161,13 @@ def prepare_grouping(global_cfg: dict) -> PreparedGrouping | None:
     if not voltage_windows and grp.get("voltage_windows") is None:
         voltage_windows = DEFAULT_VOLTAGE_WINDOWS
 
-    groupcfg_kwargs = dict(
+    gcfg = GroupCfg(
         pause_label=str(grp.get("pause_label", "PAU")),
         min_points=int(grp.get("min_points", 5)),
         require_step_change=bool(grp.get("require_step_change", True)),
         voltage_low=_to_float(voltage_low),
         voltage_high=_to_float(voltage_high),
+        voltage_windows=voltage_windows,
     )
 
     try:
