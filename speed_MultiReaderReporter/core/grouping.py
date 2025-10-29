@@ -3,11 +3,16 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 
+DEFAULT_VOLTAGE_WINDOWS: tuple[tuple[float, float], ...] = ((1.9, 2.1), (3.55, 3.65))
+
 @dataclass
 class GroupCfg:
     pause_label: str = "PAU"
     min_points: int = 5
     require_step_change: bool = True
+    voltage_low: float | None = None
+    voltage_high: float | None = None
+    voltage_windows: tuple[tuple[float, float], ...] = DEFAULT_VOLTAGE_WINDOWS
 
 def _where_step_changes(step: pd.Series) -> np.ndarray:
     s = pd.to_numeric(step, errors="coerce")
@@ -23,71 +28,120 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
     if N == 0:
         return []
 
-    # candidate starts: rows where state == pause_label
-    pau_mask = (df["state"].astype(str).values == cfg.pause_label)
-    starts = np.where(pau_mask)[0].tolist()
-    if not starts or starts[0] != 0:
-        starts = [0] + starts  # ensure first segment starts at 0
-    # unique, sorted
-    starts = sorted(set(starts))
-    # provisional ends from next starts
-    ends = (starts[1:] + [N])  # pythonic, last end = N
+    # candidate starts: positions with pause label that coincide with a step change boundary
+    state_vals_raw = df["state"].astype(str).fillna("")
+    state_vals = np.array([s.strip().upper() for s in state_vals_raw])
+    pause_label_norm = str(cfg.pause_label).strip().upper()
 
-    # snap starts/ends to nearest step change (if requested)
     if cfg.require_step_change:
-        # change indices mark i where value changes at i -> i+1
+        # boundaries indicate the first index of a new step (including 0)
         change_idx = _where_step_changes(df["step_int"])
-        if change_idx.size > 0:
-            # valid cut positions are "between rows": i change means boundary at i+1
-            boundaries = (change_idx + 1).astype(int)
-            boundaries.sort()
+        boundaries = np.concatenate(([0], change_idx + 1)) if change_idx.size else np.array([0])
+        boundaries = np.unique(np.clip(boundaries, 0, N - 1))
+    else:
+        # when step enforcement is disabled, allow any row as potential start
+        boundaries = np.arange(N, dtype=int)
 
-            def snap_left(i: int) -> int:
-                # nearest boundary <= i  (or keep at 0)
-                k = np.searchsorted(boundaries, i, side="right") - 1
-                return 0 if k < 0 else int(boundaries[k])
+    if "voltage_V" in df.columns:
+        voltage_vals = pd.to_numeric(df["voltage_V"], errors="coerce").to_numpy()
+    else:
+        voltage_vals = np.full(N, np.nan)
 
-            def snap_right(j: int) -> int:
-                # nearest boundary >= j  (or keep at N)
-                k = np.searchsorted(boundaries, j, side="left")
-                return N if k >= boundaries.size else int(boundaries[k])
+    def _is_valid_voltage(v: float) -> bool:
+        if not np.isfinite(v):
+            return False
+        windows = getattr(cfg, "voltage_windows", ()) or ()
+        if windows:
+            for low, high in windows:
+                lo = -np.inf if low is None else float(low)
+                hi = np.inf if high is None else float(high)
+                if lo > hi:
+                    lo, hi = hi, lo
+                if lo <= v <= hi:
+                    return True
+            return False
 
-            starts = [snap_left(int(i)) for i in starts]
-            ends = [snap_right(int(j)) for j in ends]
-        else:
-            # no step changes: keep original indices
-            pass
+        low_set = cfg.voltage_low is not None
+        high_set = cfg.voltage_high is not None
+        if not low_set and not high_set:
+            return True
+
+        low = cfg.voltage_low if low_set else -np.inf
+        high = cfg.voltage_high if high_set else np.inf
+        return v < low or v > high
+
+    starts: list[int] = []
+    boundary_count = len(boundaries)
+    for pos, idx in enumerate(boundaries):
+        if idx >= N:
+            continue
+
+        next_boundary = boundaries[pos + 1] if pos + 1 < boundary_count else N
+        candidate_idx: int | None = None
+
+        if state_vals[idx] == pause_label_norm:
+            candidate_idx = int(idx)
+        elif next_boundary > idx:
+            window_states = state_vals[idx:next_boundary]
+            pause_positions = np.where(window_states == pause_label_norm)[0]
+            if pause_positions.size:
+                candidate_idx = int(idx + pause_positions[0])
+
+        if candidate_idx is None or candidate_idx >= N:
+            continue
+
+        v = voltage_vals[candidate_idx] if candidate_idx < len(voltage_vals) else np.nan
+        if not _is_valid_voltage(v):
+            continue
+
+        if not starts or candidate_idx != starts[-1]:
+            starts.append(candidate_idx)
+
+    if not starts:
+        return [(df.reset_index(drop=True), "G1 (full)")]
+
+    # ensure coverage from the first valid pause onwards
+    ends = starts[1:] + [N]
 
     # build segments and clean up tiny ones
     segs = []
+    buffered = None
     for k, (a, b) in enumerate(zip(starts, ends), start=1):
         a = max(0, min(a, N))
         b = max(a+1, min(b, N))
         seg = df.iloc[a:b].copy()
+        if buffered is not None:
+            seg = pd.concat([buffered, seg])
+            buffered = None
+
         if len(seg) < cfg.min_points:
-            # merge forward if possible, else skip
-            if segs:
-                # append to previous
-                prev = segs[-1][0]
-                segs[-1] = (pd.concat([prev, seg]).reset_index(drop=True), segs[-1][1])
-            else:
-                # if first is too short, just skip
-                continue
+            buffered = seg
+            continue
+
+        step_vals = pd.to_numeric(seg["step_int"], errors="coerce")
+        finite = step_vals.dropna()
+        if finite.empty:
+            label = f"G{k}"
         else:
-            step_vals = pd.to_numeric(seg["step_int"], errors="coerce")
+            label = f"G{k} (steps {int(finite.min())}–{int(finite.max())})"
+        segs.append((seg.reset_index(drop=True), label))
+
+    if buffered is not None:
+        if segs:
+            last_df, last_label = segs[-1]
+            merged = pd.concat([last_df, buffered]).reset_index(drop=True)
+            segs[-1] = (merged, last_label)
+        else:
+            seg = buffered.reset_index(drop=True)
+            step_vals = pd.to_numeric(seg.get("step_int"), errors="coerce")
             finite = step_vals.dropna()
-            if finite.empty:
-                label = f"G{k}"
-            else:
-                label = f"G{k} (steps {int(finite.min())}–{int(finite.max())})"
-            segs.append((seg.reset_index(drop=True), label))
+            label = "G1" if finite.empty else f"G1 (steps {int(finite.min())}–{int(finite.max())})"
+            segs.append((seg, label))
 
     if not segs:
         return [(df.reset_index(drop=True), "G1 (full)")]
     return segs
 # --- config-driven wrapper helpers ---
-
-from dataclasses import dataclass
 
 @dataclass
 class PreparedGrouping:
@@ -96,6 +150,36 @@ class PreparedGrouping:
     do_plots: bool
     cfg: GroupCfg
     max_points_per_segment: int
+
+def _parse_voltage_windows(value) -> tuple[tuple[float, float], ...]:
+    if value is None:
+        return DEFAULT_VOLTAGE_WINDOWS
+
+    windows: list[tuple[float, float]] = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            low_raw, high_raw = item[0], item[1]
+            try:
+                low = float(low_raw) if low_raw is not None else None
+            except (TypeError, ValueError):
+                low = None
+            try:
+                high = float(high_raw) if high_raw is not None else None
+            except (TypeError, ValueError):
+                high = None
+
+            if low is None and high is None:
+                continue
+
+            if low is not None and high is not None and high < low:
+                low, high = high, low
+
+            windows.append((low, high))
+
+    return tuple(windows)
+
 
 def prepare_grouping(global_cfg: dict) -> PreparedGrouping | None:
     """
@@ -113,11 +197,35 @@ def prepare_grouping(global_cfg: dict) -> PreparedGrouping | None:
     if mode == "off":
         return None
 
-    gcfg = GroupCfg(
+    voltage_low = grp.get("voltage_low")
+    voltage_high = grp.get("voltage_high")
+    def _to_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    voltage_windows = _parse_voltage_windows(grp.get("voltage_windows"))
+    if not voltage_windows and grp.get("voltage_windows") is None:
+        voltage_windows = DEFAULT_VOLTAGE_WINDOWS
+
+    groupcfg_kwargs = dict(
         pause_label=str(grp.get("pause_label", "PAU")),
         min_points=int(grp.get("min_points", 5)),
         require_step_change=bool(grp.get("require_step_change", True)),
+        voltage_low=_to_float(voltage_low),
+        voltage_high=_to_float(voltage_high),
     )
+
+    gcfg = GroupCfg(**groupcfg_kwargs)
+    try:
+        setattr(gcfg, "voltage_windows", voltage_windows)
+    except Exception:
+        # Some legacy implementations of GroupCfg might not allow attribute mutation,
+        # in which case we leave the default behavior untouched.
+        pass
     return PreparedGrouping(
         mode=mode,
         do_report=(mode in ("report", "both")),
@@ -140,7 +248,11 @@ def compute_grouped_segments(
     flat: list[tuple[pd.DataFrame, str, str]] = []
 
     for df_chk, lbl_chk in checkup_list:
-        segs = split_checkup_into_groups(df_chk, gcfg)
+        label_norm = str(lbl_chk).lower()
+        if "glu" in label_norm or "aer" in label_norm:
+            segs = [(df_chk.reset_index(drop=True), "G1 (full)")]
+        else:
+            segs = split_checkup_into_groups(df_chk, gcfg)
         per_run.append((lbl_chk, segs))
         for df_seg, grp_label in segs:
             flat.append((df_seg, lbl_chk, grp_label))
