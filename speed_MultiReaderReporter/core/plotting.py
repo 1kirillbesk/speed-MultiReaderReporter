@@ -22,3 +22,65 @@ def save_group_plot(cell: str, series_list: list, group_dir: Path, title_suffix:
     plt.savefig(out_path, dpi=160)
     plt.close()
     print(f"[OK] {cell} [{title_suffix}]: {len(series_list)} file(s) → {out_path}")
+
+def _sanitize(name: str) -> str:
+    import re
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+    return s[:120] if len(s) > 120 else s
+
+def _thin_xy(x, y, max_points: int):
+    """Light decimator: keep at most max_points evenly spaced points."""
+    import numpy as np
+    n = len(x)
+    if n <= max_points or max_points <= 0:
+        return x, y
+    idx = np.linspace(0, n - 1, max_points).astype(int)
+    return x[idx], y[idx]
+
+def save_grouped_checkup_plot(cell: str,
+                              run_label: str,
+                              segments: list[tuple],   # [(df_seg, group_label), ...]
+                              out_dir: Path,
+                              max_points_per_segment: int = 5000):
+    """
+    Visual check: plot a single checkup broken into groups (segments).
+    Plots current vs absolute time; one color per segment with labels.
+    Uses light decimation for speed when segments are huge.
+    """
+    if not segments:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    import matplotlib.pyplot as plt
+    # Voltage trace is required for this debug plot (time vs voltage)
+    has_voltage = any("voltage_V" in df_seg.columns for df_seg, _ in segments)
+    if not has_voltage:
+        print(f"[SKIP] {cell} — {run_label}: no voltage column for grouped plot.")
+        return
+
+    non_empty = [(df_seg, glabel) for df_seg, glabel in segments if not df_seg.empty]
+    if len(non_empty) < 2:
+        print(f"[SKIP] {cell} — {run_label}: less than two segments with data.")
+        return
+
+    plt.figure(figsize=(11, 4))
+    for df_seg, glabel in non_empty:
+        x = df_seg["abs_time"].values
+        y = df_seg["voltage_V"].values
+        x, y = _thin_xy(x, y, max_points_per_segment)
+        plt.plot(x, y, label=glabel)
+
+    plt.xlabel("Zeit (absolute)")
+    plt.ylabel("Spannung [V]")
+    plt.title(f"Cell: {cell} — Checkup grouped (Spannung): {run_label}")
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=8, ncol=4, loc="upper center",
+               bbox_to_anchor=(0.5, -0.18), frameon=False)
+    plt.tight_layout(rect=[0, 0.20, 1, 1])
+
+    fname = f"{_sanitize(run_label)}_grouped_voltage.png"
+    out_path = out_dir / fname
+    plt.savefig(out_path, dpi=160)
+    plt.close()
+    print(f"[OK] grouped voltage plot → {out_path}")
+

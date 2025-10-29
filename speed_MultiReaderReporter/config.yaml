@@ -1,7 +1,7 @@
 # speed_MultiReaderReporter/config.yaml
 
 input:
-  path: "../data/speed"          # folder OR single file; detector will recurse if it's a folder
+  path: "../data/speed_csv"          # folder OR single file; detector will recurse if it's a folder
   recurse: true
 
 output:
@@ -25,3 +25,19 @@ legend:
 
 logging:
   verbose: true
+
+checkup_grouping:
+  # Use ONE of: off | report | plot | both
+  mode: "plot"                 # disables both computation & plotting when "off"
+
+  # Backward-compat (optional): if you still have old keys, they’re ignored
+  enabled: false              # ignored when 'mode' is set
+  plot_segments: false        # ignored when 'mode' is set
+
+  pause_label: "PAU"
+  min_points: 5
+  require_step_change: true
+
+  # Optional: limit plotted points per segment (for speed)
+  plot_max_points_per_segment: 5000
+

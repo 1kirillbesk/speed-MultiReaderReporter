@@ -8,6 +8,6 @@ import pandas as pd
 class RunRecord:
     cell: str                 # e.g. SPEED_LW_reference_4
     program: str              # program/test name (short)
-    df: pd.DataFrame          # canonical columns: abs_time, current_A, (voltage_V)?, (step_int)?
+    df: pd.DataFrame          # canonical columns: abs_time, current_A, Zustand, (voltage_V)?, (step_int)?
     source_path: Path         # file on disk (.zip/.csv/.mat)
     loader: str               # "csvzip" or "mat"

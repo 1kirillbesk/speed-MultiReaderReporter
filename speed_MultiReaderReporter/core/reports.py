@@ -86,3 +86,27 @@ def write_report(series_list,
         _write_csv(df_out, out_base.with_suffix(".csv"), title)
     if fmt in ("mat", "both"):
         _write_mat(df_out, out_base.with_suffix(".mat"), mat_variable, title)
+
+def _build_dataframe_grouped(segments) -> pd.DataFrame:
+    """
+    segments: list of tuples (df_seg, program_label, group_label)
+    """
+    from .metrics import run_metrics
+    rows = []
+    for df_seg, prog, grp in segments:
+        r = run_metrics(df_seg, prog)
+        r["group"] = grp
+        rows.append(r)
+    cols = ["program","group","start_time","end_time","duration_h","throughput_Ah","net_Ah",
+            "avg_abs_current_A","avg_current_A","max_abs_current_A","n_points"]
+    return pd.DataFrame(rows, columns=cols)
+
+def write_grouped_report(segments, out_base: Path, title: str,
+                         fmt: ReportFormat = "csv", mat_variable: str = "report_grouped") -> None:
+    if not segments:
+        return
+    df_out = _build_dataframe_grouped(segments)
+    if fmt in ("csv","both"):
+        _write_csv(df_out, out_base.with_suffix(".csv"), title)
+    if fmt in ("mat","both"):
+        _write_mat(df_out, out_base.with_suffix(".mat"), mat_variable, title)

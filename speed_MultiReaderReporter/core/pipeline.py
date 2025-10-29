@@ -5,11 +5,12 @@ from pathlib import Path
 import pandas as pd
 
 from .classify import is_checkup_run, configure_from_config
-from .plotting import save_group_plot
-from .reports import write_report
+from .plotting import save_group_plot, save_grouped_checkup_plot
+from .reports import write_report, write_grouped_report
 from .capacity import compute_checkup_point_step19
 from .soh import cumulative_throughput_until
 from .model import RunRecord
+from .grouping import prepare_grouping, compute_grouped_segments
 
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
@@ -43,6 +44,33 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         write_report(total_list, cell_dir / "total" / "report", f"{cell} total", fmt=fmt, mat_variable=mat_var)
         write_report(checkup_list, cell_dir / "checkup" / "report", f"{cell} checkup", fmt=fmt, mat_variable=mat_var)
         write_report(cycling_list, cell_dir / "cycling" / "report", f"{cell} cycling", fmt=fmt, mat_variable=mat_var)
+
+        # --- optional grouped report + per-checkup grouped plots ---
+        prep = prepare_grouping(cfg)  # returns None when mode = off
+        if prep is not None:
+            # Compute segments once
+            per_run, grouped_flat = compute_grouped_segments(checkup_list, prep.cfg)
+
+            # Optional per-checkup debug plots
+            if prep.do_plots:
+                for run_label, segs in per_run:
+                    save_grouped_checkup_plot(
+                        cell=cell,
+                        run_label=run_label,
+                        segments=segs,
+                        out_dir=cell_dir / "checkup" / "grouped_plots",
+                        max_points_per_segment=prep.max_points_per_segment,
+                    )
+
+            # Optional grouped report
+            if prep.do_report and grouped_flat:
+                write_grouped_report(
+                    grouped_flat,
+                    cell_dir / "checkup" / "report_grouped",
+                    f"{cell} checkup (grouped)",
+                    fmt=fmt,
+                    mat_variable=mat_var if fmt != "csv" else "report_grouped",
+                )
 
         # SoH: step-19 capacity vs cumulative throughput (checkups only; need step_int)
         soh_points = []

@@ -1,7 +1,6 @@
 # speed_MultiReaderReporter/loaders/mat_loader.py
 from __future__ import annotations
 from pathlib import Path
-import re
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
@@ -80,6 +79,18 @@ def _df_from_mat(path: Path) -> pd.DataFrame:
     if "step" in a and len(a["step"]) == len(t):
         step_ser = pd.Series(a["step"])
         df["step_int"] = pd.to_numeric(step_ser, errors="coerce").round().astype("Int64")
+    try:
+        m = loadmat(path, squeeze_me=True, struct_as_record=False)
+        diga = m.get("diga")
+        daten = getattr(diga, "daten", None) if diga is not None else None
+        zst = getattr(daten, "Zustand", None) if daten is not None else None
+        if zst is not None:
+            zst = np.asarray(zst).astype(object).ravel()
+            # make length agree and convert to str series
+            if len(zst) == len(df):
+                df["state"] = pd.Series(zst).astype(str)
+    except Exception:
+        pass
 
     return df
 
