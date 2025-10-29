@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import yaml
 
-from loaders import csvzip_loader, mat_loader
+from loaders import csvzip_loader, mat_loader, pkl_loader
 from utils.detect import discover_inputs
 from core.pipeline import run_pipeline
 
@@ -49,8 +49,9 @@ def main():
     # ---------- loader registry ----------
     registry = {
         "csvzip": csvzip_loader.load,
-        "csv":    csvzip_loader.load,  # reuse same loader for loose CSVs
+        "csv":    csvzip_loader.load,
         "mat":    mat_loader.load,
+        "pkl": pkl_loader.load,
     }
 
     all_runs = []   # list of RunRecord; shared canonical structure

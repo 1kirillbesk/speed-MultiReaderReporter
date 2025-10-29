@@ -5,7 +5,7 @@ It standardizes everything into one format and generates per-cell plots and repo
 
 ## ✳️ What it does
 
-- Auto-detects inputs: **`.mat`**, **`.csv`**, or **`.zip`** (containing CSVs)
+- Auto-detects inputs: **`.mat`**, **`.csv`**, **`.pkl`** or **`.zip`** (containing CSVs)
 - Standardizes each run to a canonical dataframe:
   - `abs_time` (datetime), `current_A` (float)
   - optional: `voltage_V`, `step_int` (exact “Schritt” only)

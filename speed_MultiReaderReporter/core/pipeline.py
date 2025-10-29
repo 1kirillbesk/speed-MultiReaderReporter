@@ -4,7 +4,7 @@ from collections import defaultdict
 from pathlib import Path
 import pandas as pd
 
-from .classify import is_checkup_run
+from .classify import is_checkup_run, configure_from_config
 from .plotting import save_group_plot
 from .reports import write_report
 from .capacity import compute_checkup_point_step19
@@ -13,6 +13,7 @@ from .model import RunRecord
 
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
+    configure_from_config(cfg)
 
     # group by cell
     by_cell: dict[str, list[tuple[pd.DataFrame, str]]] = defaultdict(list)

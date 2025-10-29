@@ -40,6 +40,8 @@ def detect_kind(p: Path) -> DetectedKind:
         return "csv"
     if p.suffix.lower() == ".zip" and _is_zip_with_csv(p):
         return "csvzip"
+    if p.suffix.lower() == ".pkl":
+        return "pkl"
     return "unknown"
 
 def discover_inputs(root: Path, recurse: bool = True) -> list[DetectedItem]:

@@ -12,7 +12,7 @@ reports:
   mat_variable: "report"   # name of the MATLAB struct variable
 
 classification:
-  checkup_keywords: ["cu", "glu"]
+  checkup_keywords: ["cu", "glu", "rpt"]
   duration_threshold_minutes: 60    # < 1h → checkup
 
 soh:
