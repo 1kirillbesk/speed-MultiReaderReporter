@@ -4,7 +4,7 @@ from pathlib import Path
 import zipfile, io, re
 import pandas as pd
 
-
+from core.normalize import parse_columns, to_abs_time, to_float, to_str
 from core.model import RunRecord
 
 # ---------- filename helpers ----------
@@ -18,49 +18,22 @@ def _program_from_name(fname: str) -> str:
     return parts[5].strip() if len(parts) >= 7 else Path(fname).stem
 
 # ---------- CSV normalization ----------
-def _parse_columns(df: pd.DataFrame):
-    cmap = {str(c).strip().lower(): c for c in df.columns}
-    zeit = cmap.get("zeit")
-    strom = cmap.get("strom")
-    spannung = cmap.get("spannung")            # optional
-    schritt = None                             # exact 'Schritt' only (avoid Schrittdauer)
-    for k, v in cmap.items():
-        if k == "schritt":
-            schritt = v
-            break
-    return zeit, strom, spannung, schritt
-
-def _to_abs_time(series: pd.Series) -> pd.Series:
-    z = pd.to_datetime(series, errors="coerce")
-    if z.notna().any():
-        return z
-    # common fallbacks
-    fmts = ["%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M:%S.%f", "%d.%m.%Y %H:%M:%S"]
-    for fmt in fmts:
-        z = pd.to_datetime(series, format=fmt, errors="coerce")
-        if z.notna().any():
-            return z
-    return z  # all NaT (will be dropped)
-
-def _to_float(s: pd.Series) -> pd.Series:
-    if pd.api.types.is_numeric_dtype(s):
-        return s.astype(float)
-    return pd.to_numeric(s.astype(str).str.replace(",", ".", regex=False), errors="coerce")
-
 def _df_from_csv_bytes(buff: bytes) -> pd.DataFrame:
-    # machine export: comma + '.' decimals
     df = pd.read_csv(io.BytesIO(buff), sep=",", decimal=".", low_memory=False)
-    zeit, strom, spannung, schritt = _parse_columns(df)
+    zeit, strom, spannung, schritt, zustand = parse_columns(df)
     if zeit is None or strom is None:
         raise ValueError("CSV missing required columns (Zeit/Strom).")
+
     cols = {
-        "abs_time":  _to_abs_time(df[zeit]),
-        "current_A": _to_float(df[strom]),
+        "abs_time":  to_abs_time(df[zeit]),
+        "current_A": to_float(df[strom]),
     }
     if spannung is not None:
-        cols["voltage_V"] = _to_float(df[spannung])
+        cols["voltage_V"] = to_float(df[spannung])
     if schritt is not None:
         cols["step_int"] = pd.to_numeric(df[schritt], errors="coerce").round().astype("Int64")
+    if zustand is not None:
+        cols["state"] = to_str(df[zustand])
     out = pd.DataFrame(cols).dropna(subset=["abs_time", "current_A"]).sort_values("abs_time")
     return out.reset_index(drop=True)
 
