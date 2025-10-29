@@ -37,19 +37,11 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
         # when step enforcement is disabled, allow any row as potential start
         boundaries = np.arange(N, dtype=int)
 
-    if "voltage_V" in df.columns:
-        voltage_vals = pd.to_numeric(df["voltage_V"], errors="coerce").to_numpy()
-    else:
-        voltage_vals = np.full(N, np.nan)
-
     starts = []
     for idx in boundaries:
         if idx >= N:
             continue
         if state_vals[idx] == cfg.pause_label:
-            v = voltage_vals[idx] if idx < len(voltage_vals) else np.nan
-            if not np.isfinite(v) or not (v < cfg.voltage_low or v > cfg.voltage_high):
-                continue
             if not starts or idx != starts[-1]:
                 starts.append(int(idx))
 
