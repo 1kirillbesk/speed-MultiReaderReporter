@@ -70,16 +70,32 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
         high = cfg.voltage_high if high_set else np.inf
         return v < low or v > high
 
-    starts = []
-    for idx in boundaries:
+    starts: list[int] = []
+    boundary_count = len(boundaries)
+    for pos, idx in enumerate(boundaries):
         if idx >= N:
             continue
+
+        next_boundary = boundaries[pos + 1] if pos + 1 < boundary_count else N
+        candidate_idx: int | None = None
+
         if state_vals[idx] == pause_label_norm:
-            v = voltage_vals[idx] if idx < len(voltage_vals) else np.nan
-            if not _is_valid_voltage(v):
-                continue
-            if not starts or idx != starts[-1]:
-                starts.append(int(idx))
+            candidate_idx = int(idx)
+        elif next_boundary > idx:
+            window_states = state_vals[idx:next_boundary]
+            pause_positions = np.where(window_states == pause_label_norm)[0]
+            if pause_positions.size:
+                candidate_idx = int(idx + pause_positions[0])
+
+        if candidate_idx is None or candidate_idx >= N:
+            continue
+
+        v = voltage_vals[candidate_idx] if candidate_idx < len(voltage_vals) else np.nan
+        if not _is_valid_voltage(v):
+            continue
+
+        if not starts or candidate_idx != starts[-1]:
+            starts.append(candidate_idx)
 
     if not starts:
         return [(df.reset_index(drop=True), "G1 (full)")]
