@@ -55,27 +55,38 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
 
     # build segments and clean up tiny ones
     segs = []
+    buffered = None
     for k, (a, b) in enumerate(zip(starts, ends), start=1):
         a = max(0, min(a, N))
         b = max(a+1, min(b, N))
         seg = df.iloc[a:b].copy()
+        if buffered is not None:
+            seg = pd.concat([buffered, seg])
+            buffered = None
+
         if len(seg) < cfg.min_points:
-            # merge forward if possible, else skip
-            if segs:
-                # append to previous
-                prev = segs[-1][0]
-                segs[-1] = (pd.concat([prev, seg]).reset_index(drop=True), segs[-1][1])
-            else:
-                # if first is too short, just skip
-                continue
+            buffered = seg
+            continue
+
+        step_vals = pd.to_numeric(seg["step_int"], errors="coerce")
+        finite = step_vals.dropna()
+        if finite.empty:
+            label = f"G{k}"
         else:
-            step_vals = pd.to_numeric(seg["step_int"], errors="coerce")
+            label = f"G{k} (steps {int(finite.min())}–{int(finite.max())})"
+        segs.append((seg.reset_index(drop=True), label))
+
+    if buffered is not None:
+        if segs:
+            last_df, last_label = segs[-1]
+            merged = pd.concat([last_df, buffered]).reset_index(drop=True)
+            segs[-1] = (merged, last_label)
+        else:
+            seg = buffered.reset_index(drop=True)
+            step_vals = pd.to_numeric(seg.get("step_int"), errors="coerce")
             finite = step_vals.dropna()
-            if finite.empty:
-                label = f"G{k}"
-            else:
-                label = f"G{k} (steps {int(finite.min())}–{int(finite.max())})"
-            segs.append((seg.reset_index(drop=True), label))
+            label = "G1" if finite.empty else f"G1 (steps {int(finite.min())}–{int(finite.max())})"
+            segs.append((seg, label))
 
     if not segs:
         return [(df.reset_index(drop=True), "G1 (full)")]
@@ -158,6 +169,16 @@ def prepare_grouping(global_cfg: dict) -> PreparedGrouping | None:
         voltage_high=_to_float(voltage_high),
         voltage_windows=voltage_windows,
     )
+
+    try:
+        gcfg = GroupCfg(voltage_windows=voltage_windows, **groupcfg_kwargs)
+    except TypeError:
+        # Older environments may not yet expose the voltage_windows parameter.
+        gcfg = GroupCfg(**groupcfg_kwargs)
+        try:
+            setattr(gcfg, "voltage_windows", voltage_windows)
+        except Exception:
+            pass
     return PreparedGrouping(
         mode=mode,
         do_report=(mode in ("report", "both")),
