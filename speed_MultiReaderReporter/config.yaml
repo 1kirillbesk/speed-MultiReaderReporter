@@ -1,0 +1,27 @@
+# speed_MultiReaderReporter/config.yaml
+
+input:
+  path: "../data/speed"          # folder OR single file; detector will recurse if it's a folder
+  recurse: true
+
+output:
+  root: "./out"           # main pipeline will create per-cell subfolders under here
+
+reports:
+  format: "csv"    # one of: csv | mat | both
+  mat_variable: "report"   # name of the MATLAB struct variable
+
+classification:
+  checkup_keywords: ["cu", "glu"]
+  duration_threshold_minutes: 60    # < 1h → checkup
+
+soh:
+  min_step_required: 20    # guard for step-19 logic
+  i_thresh_A: 0.0          # ignore |I| below this when integrating step-19
+  eod_v_cut_V: null        # set (e.g., 3.0) if you want early cutoff by voltage
+
+legend:
+  ncol: 4
+
+logging:
+  verbose: true
