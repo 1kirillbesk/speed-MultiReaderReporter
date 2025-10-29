@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 
+DEFAULT_VOLTAGE_WINDOWS: tuple[tuple[float, float], ...] = ((1.9, 2.1), (3.55, 3.65))
+
 @dataclass
 class GroupCfg:
     pause_label: str = "PAU"
@@ -88,6 +90,36 @@ class PreparedGrouping:
     cfg: GroupCfg
     max_points_per_segment: int
 
+def _parse_voltage_windows(value) -> tuple[tuple[float, float], ...]:
+    if value is None:
+        return DEFAULT_VOLTAGE_WINDOWS
+
+    windows: list[tuple[float, float]] = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            low_raw, high_raw = item[0], item[1]
+            try:
+                low = float(low_raw) if low_raw is not None else None
+            except (TypeError, ValueError):
+                low = None
+            try:
+                high = float(high_raw) if high_raw is not None else None
+            except (TypeError, ValueError):
+                high = None
+
+            if low is None and high is None:
+                continue
+
+            if low is not None and high is not None and high < low:
+                low, high = high, low
+
+            windows.append((low, high))
+
+    return tuple(windows)
+
+
 def prepare_grouping(global_cfg: dict) -> PreparedGrouping | None:
     """
     Read checkup_grouping section from config and return a PreparedGrouping.
@@ -104,10 +136,27 @@ def prepare_grouping(global_cfg: dict) -> PreparedGrouping | None:
     if mode == "off":
         return None
 
+    voltage_low = grp.get("voltage_low")
+    voltage_high = grp.get("voltage_high")
+    def _to_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    voltage_windows = _parse_voltage_windows(grp.get("voltage_windows"))
+    if not voltage_windows and grp.get("voltage_windows") is None:
+        voltage_windows = DEFAULT_VOLTAGE_WINDOWS
+
     gcfg = GroupCfg(
         pause_label=str(grp.get("pause_label", "PAU")),
         min_points=int(grp.get("min_points", 5)),
         require_step_change=bool(grp.get("require_step_change", True)),
+        voltage_low=_to_float(voltage_low),
+        voltage_high=_to_float(voltage_high),
+        voltage_windows=voltage_windows,
     )
     return PreparedGrouping(
         mode=mode,
