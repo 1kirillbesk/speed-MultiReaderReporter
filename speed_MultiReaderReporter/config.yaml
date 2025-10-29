@@ -28,7 +28,7 @@ logging:
 
 checkup_grouping:
   # Use ONE of: off | report | plot | both
-  mode: "plot"                 # disables both computation & plotting when "off"
+  mode: "both"                 # disables both computation & plotting when "off"
 
   # Backward-compat (optional): if you still have old keys, they’re ignored
   enabled: false              # ignored when 'mode' is set

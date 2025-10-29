@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 
 def integrate_ah(df: pd.DataFrame) -> tuple[float, float]:
-    """(throughput_Ah, net_Ah) using trapezoidal rule; keeps your 'trapezoid' preference."""
     if df.empty:
         return 0.0, 0.0
     t = (df["abs_time"] - df["abs_time"].iloc[0]).dt.total_seconds().to_numpy()
