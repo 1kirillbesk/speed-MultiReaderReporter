@@ -8,6 +8,8 @@ class GroupCfg:
     pause_label: str = "PAU"
     min_points: int = 5
     require_step_change: bool = True
+    voltage_low: float = 2.0
+    voltage_high: float = 3.6
 
 def _where_step_changes(step: pd.Series) -> np.ndarray:
     s = pd.to_numeric(step, errors="coerce")
@@ -78,8 +80,6 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
     return segs
 # --- config-driven wrapper helpers ---
 
-from dataclasses import dataclass
-
 @dataclass
 class PreparedGrouping:
     mode: str                      # off | report | plot | both
@@ -131,7 +131,11 @@ def compute_grouped_segments(
     flat: list[tuple[pd.DataFrame, str, str]] = []
 
     for df_chk, lbl_chk in checkup_list:
-        segs = split_checkup_into_groups(df_chk, gcfg)
+        label_norm = str(lbl_chk).lower()
+        if "glu" in label_norm or "aer" in label_norm:
+            segs = [(df_chk.reset_index(drop=True), "G1 (full)")]
+        else:
+            segs = split_checkup_into_groups(df_chk, gcfg)
         per_run.append((lbl_chk, segs))
         for df_seg, grp_label in segs:
             flat.append((df_seg, lbl_chk, grp_label))
