@@ -1,6 +1,6 @@
 # SPEED MultiReaderReporter
 
-Unified tool for processing battery experiment data stored either in **MATLAB `.mat`** struct files (diga.daten) or **CSV files inside ZIP archives** (machine-exported).  
+Unified tool for processing battery experiment data stored in **MATLAB `.mat`** struct files (diga.daten), **CSV files inside ZIP archives** (machine-exported) or **Python pickle files** (exported from MATLAB).  
 It standardizes everything into one format and generates per-cell plots and reports.
 
 ## ✳️ What it does
