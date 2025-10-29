@@ -23,40 +23,31 @@ def split_checkup_into_groups(df: pd.DataFrame, cfg: GroupCfg) -> list[tuple[pd.
     if N == 0:
         return []
 
-    # candidate starts: rows where state == pause_label
-    pau_mask = (df["state"].astype(str).values == cfg.pause_label)
-    starts = np.where(pau_mask)[0].tolist()
-    if not starts or starts[0] != 0:
-        starts = [0] + starts  # ensure first segment starts at 0
-    # unique, sorted
-    starts = sorted(set(starts))
-    # provisional ends from next starts
-    ends = (starts[1:] + [N])  # pythonic, last end = N
+    # candidate starts: positions with pause label that coincide with a step change boundary
+    state_vals = df["state"].astype(str).fillna("").to_numpy()
 
-    # snap starts/ends to nearest step change (if requested)
     if cfg.require_step_change:
-        # change indices mark i where value changes at i -> i+1
+        # boundaries indicate the first index of a new step (including 0)
         change_idx = _where_step_changes(df["step_int"])
-        if change_idx.size > 0:
-            # valid cut positions are "between rows": i change means boundary at i+1
-            boundaries = (change_idx + 1).astype(int)
-            boundaries.sort()
+        boundaries = np.concatenate(([0], change_idx + 1)) if change_idx.size else np.array([0])
+        boundaries = np.unique(np.clip(boundaries, 0, N - 1))
+    else:
+        # when step enforcement is disabled, allow any row as potential start
+        boundaries = np.arange(N, dtype=int)
 
-            def snap_left(i: int) -> int:
-                # nearest boundary <= i  (or keep at 0)
-                k = np.searchsorted(boundaries, i, side="right") - 1
-                return 0 if k < 0 else int(boundaries[k])
+    starts = []
+    for idx in boundaries:
+        if idx >= N:
+            continue
+        if state_vals[idx] == cfg.pause_label:
+            if not starts or idx != starts[-1]:
+                starts.append(int(idx))
 
-            def snap_right(j: int) -> int:
-                # nearest boundary >= j  (or keep at N)
-                k = np.searchsorted(boundaries, j, side="left")
-                return N if k >= boundaries.size else int(boundaries[k])
+    if not starts:
+        return [(df.reset_index(drop=True), "G1 (full)")]
 
-            starts = [snap_left(int(i)) for i in starts]
-            ends = [snap_right(int(j)) for j in ends]
-        else:
-            # no step changes: keep original indices
-            pass
+    # ensure coverage from the first valid pause onwards
+    ends = starts[1:] + [N]
 
     # build segments and clean up tiny ones
     segs = []

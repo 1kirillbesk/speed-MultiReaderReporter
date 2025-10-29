@@ -52,26 +52,35 @@ def save_grouped_checkup_plot(cell: str,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     import matplotlib.pyplot as plt
+    # Voltage trace is required for this debug plot (time vs voltage)
+    has_voltage = any("voltage_V" in df_seg.columns for df_seg, _ in segments)
+    if not has_voltage:
+        print(f"[SKIP] {cell} — {run_label}: no voltage column for grouped plot.")
+        return
+
+    non_empty = [(df_seg, glabel) for df_seg, glabel in segments if not df_seg.empty]
+    if len(non_empty) < 2:
+        print(f"[SKIP] {cell} — {run_label}: less than two segments with data.")
+        return
+
     plt.figure(figsize=(11, 4))
-    for df_seg, glabel in segments:
-        if df_seg.empty:
-            continue
+    for df_seg, glabel in non_empty:
         x = df_seg["abs_time"].values
-        y = df_seg["current_A"].values
+        y = df_seg["voltage_V"].values
         x, y = _thin_xy(x, y, max_points_per_segment)
         plt.plot(x, y, label=glabel)
 
     plt.xlabel("Zeit (absolute)")
-    plt.ylabel("Strom [A]")
-    plt.title(f"Cell: {cell} — Checkup grouped: {run_label}")
+    plt.ylabel("Spannung [V]")
+    plt.title(f"Cell: {cell} — Checkup grouped (Spannung): {run_label}")
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=8, ncol=4, loc="upper center",
                bbox_to_anchor=(0.5, -0.18), frameon=False)
     plt.tight_layout(rect=[0, 0.20, 1, 1])
 
-    fname = f"{_sanitize(run_label)}_grouped.png"
+    fname = f"{_sanitize(run_label)}_grouped_voltage.png"
     out_path = out_dir / fname
     plt.savefig(out_path, dpi=160)
     plt.close()
-    print(f"[OK] grouped plot → {out_path}")
+    print(f"[OK] grouped voltage plot → {out_path}")
 
