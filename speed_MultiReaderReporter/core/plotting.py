@@ -2,26 +2,95 @@
 from __future__ import annotations
 from pathlib import Path
 import matplotlib.pyplot as plt
+import pandas as pd
 
 def save_group_plot(cell: str, series_list: list, group_dir: Path, title_suffix: str, legend_ncol: int = 4):
     if not series_list:
         return
     group_dir.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(11, 6))
+
+    _save_time_series_plot(
+        cell=cell,
+        title_suffix=title_suffix,
+        series_list=series_list,
+        group_dir=group_dir,
+        legend_ncol=legend_ncol,
+        y_column="current_A",
+        y_label="Strom [A]",
+        title_metric="Strom vs Zeit",
+        file_name="strom_vs_zeit.png",
+        log_label="current plot",
+    )
+
+    _save_time_series_plot(
+        cell=cell,
+        title_suffix=title_suffix,
+        series_list=series_list,
+        group_dir=group_dir,
+        legend_ncol=legend_ncol,
+        y_column="voltage_V",
+        y_label="Spannung [V]",
+        title_metric="Spannung vs Zeit",
+        file_name="spannung_vs_zeit.png",
+        log_label="voltage plot",
+    )
+
+
+def _save_time_series_plot(
+    *,
+    cell: str,
+    title_suffix: str,
+    series_list: list,
+    group_dir: Path,
+    legend_ncol: int,
+    y_column: str,
+    y_label: str,
+    title_metric: str,
+    file_name: str,
+    log_label: str,
+):
+    prepared: list[tuple[pd.Series, pd.Series, str]] = []
+    column_present = False
     for df, label in series_list:
-        if df.empty: continue
-        plt.plot(df["abs_time"].values, df["current_A"].values, label=label)
+        if df.empty or "abs_time" not in df.columns:
+            continue
+        if y_column not in df.columns:
+            continue
+        column_present = True
+        values = pd.to_numeric(df[y_column], errors="coerce")
+        if not isinstance(values, pd.Series):
+            values = pd.Series(values, index=df.index)
+        mask = values.notna()
+        if not mask.any():
+            continue
+        prepared.append((df.loc[mask, "abs_time"], values.loc[mask], label))
+
+    if not prepared:
+        if not column_present:
+            print(f"[INFO] {cell} [{title_suffix}]: column '{y_column}' missing; skipping {log_label}.")
+        else:
+            print(f"[INFO] {cell} [{title_suffix}]: column '{y_column}' contains no numeric data; skipping {log_label}.")
+        return
+
+    plt.figure(figsize=(11, 6))
+    for x, y, label in prepared:
+        plt.plot(x.values, y.values, label=label)
     plt.xlabel("Zeit (absolute)")
-    plt.ylabel("Strom [A]")
-    plt.title(f"Cell: {cell} — Strom vs Zeit ({title_suffix})")
+    plt.ylabel(y_label)
+    plt.title(f"Cell: {cell} — {title_metric} ({title_suffix})")
     plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=8, ncol=legend_ncol, loc="upper center",
-               bbox_to_anchor=(0.5, -0.15), frameon=False)
+    plt.legend(
+        fontsize=8,
+        ncol=legend_ncol,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        frameon=False,
+    )
     plt.tight_layout(rect=[0, 0.18, 1, 1])
-    out_path = group_dir / "strom_vs_zeit.png"
+    out_path = group_dir / file_name
     plt.savefig(out_path, dpi=160)
     plt.close()
-    print(f"[OK] {cell} [{title_suffix}]: {len(series_list)} file(s) → {out_path}")
+    print(f"[OK] {cell} [{title_suffix}]: {len(prepared)} series → {out_path}")
 
 def _sanitize(name: str) -> str:
     import re
