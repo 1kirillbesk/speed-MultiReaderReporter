@@ -15,11 +15,12 @@ SPEED MultiReaderReporter automatically:
 - Detects input file formats (`.mat`, `.csv`, `.zip`, `.pkl`)
 - Standardizes each dataset into a common structure:
   - `abs_time` — absolute timestamp  
-  - `current_A` — current in amperes  
-  - (optional) `voltage_V`, `step_int`
+  - `current_A` — current in amperes 
+  - `voltage_V` - voltage in volts
+  - (optional) `step_int`
 - Classifies experiments into **checkup** and **cycling**
 - Generates:
-  - Strom-vs-Zeit plots for total, checkup, and cycling data
+  - Strom-vs-Zeit and Spannung-vs-Zeit plots for total, checkup, and cycling data
   - Throughput and current statistics (`report.csv` or `.mat`)
   - Optional **checkup-segment breakdowns** that split pauses into voltage-defined groups
   - Optional **SoH plots**: discharge capacity (step-19) vs cumulative charge throughput
