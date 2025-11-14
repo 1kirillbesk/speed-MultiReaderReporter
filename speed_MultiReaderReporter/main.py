@@ -54,7 +54,7 @@ def main():
         "pkl": pkl_loader.load,
     }
 
-    all_runs = []   # list of RunRecord; shared canonical structure
+    processed_cells: set[str] = set()
     for item in detected:
         loader = registry.get(item.kind)
         if loader is None:
@@ -65,13 +65,24 @@ def main():
             print(f"[load] {item.kind:6}  {item.path.name}")
         try:
             runs = loader(item.path, cfg, out_root)
-            if runs:
-                all_runs.extend(runs)
+            if not runs:
+                continue
+            if verbose:
+                cells = sorted({r.cell for r in runs})
+                print(
+                    f"[pipeline] processing {len(runs)} run(s) "
+                    f"across {len(cells)} cell(s): {', '.join(cells)}"
+                )
+            run_pipeline(runs, cfg, out_root)
+            processed_cells.update(r.cell for r in runs)
+            del runs
         except Exception as e:
             print(f"[WARN] loader failed for {item.path.name}: {e}")
     if verbose:
-        print(f"[summary] total runs loaded: {len(all_runs)}")
-    run_pipeline(all_runs, cfg, out_root)
+        print(
+            f"[summary] processed cells: {len(processed_cells)}"
+            + (f" → {sorted(processed_cells)}" if processed_cells else "")
+        )
 
 if __name__ == "__main__":
     main()

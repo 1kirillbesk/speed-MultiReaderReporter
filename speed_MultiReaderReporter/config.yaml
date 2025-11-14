@@ -1,7 +1,7 @@
 # speed_MultiReaderReporter/config.yaml
 
 input:
-  path: "../data/speed_csv"          # folder OR single file; detector will recurse if it's a folder
+  path: "../data"          # folder OR single file; detector will recurse if it's a folder
   recurse: true
 
 output:
