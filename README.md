@@ -5,7 +5,7 @@
 - **CSV files (inside `.zip` archives or standalone)**, and  
 - **Python pickle (`.pkl`) files**.  
 
-It standardizes all data into a single format and produces per-cell plots, reports, and optional State-of-Health (SoH) analyses — all **fully configurable through `config.yaml`**.
+It standardizes all data into a single format and produces per-cell plots, reports, and optional State-of-Health (SoH) analyses — all **fully configurable through `config.yaml`**. Inputs belonging to the same cell are automatically batched and processed together to keep memory bounded and to prevent plot/report overwrites when multiple raw files exist for one cell.
 
 ---
 
@@ -13,6 +13,7 @@ It standardizes all data into a single format and produces per-cell plots, repor
 
 SPEED MultiReaderReporter automatically:
 - Detects input file formats (`.mat`, `.csv`, `.zip`, `.pkl`)
+- Loads **all inputs for the same cell together**, processing one cell at a time to bound RAM and isolate outputs
 - Standardizes each dataset into a common structure:
   - `abs_time` — absolute timestamp  
   - `current_A` — current in amperes 
@@ -56,6 +57,7 @@ output:
   root: "./speed_MultiReaderReporter/out"  # Where to save results
 
 classification:
+  cycling_keywords: ["cyc"]                  # Force cycling when present in the name
   checkup_keywords: ["cu", "glu", "rpt"]   # Keywords to identify checkups
   duration_threshold_minutes: 60           # < 1 h = checkup
   step_min_required: 20                    # min step number to consider
@@ -91,8 +93,9 @@ The program will:
 
 1. Read `config.yaml`
 2. Automatically detect the file format of each input
-3. Standardize and process data through the same pipeline
-4. Save plots and reports into per-cell folders under the output directory
+3. Group inputs by cell and load only one cell’s data at a time
+4. Standardize and process aggregated runs through the same pipeline
+5. Save plots and reports into per-cell folders under the output directory
 
 No command-line arguments are required — **the entire workflow is controlled via the YAML file**.
 
@@ -128,13 +131,19 @@ out/<CELL_NAME>/
 
 The classification logic uses a combination of:
 
-1. **Program keywords** — if the filename or program name contains any of the configured `checkup_keywords` (e.g. `cu`, `glu`, `rpt`), the run is marked as a *checkup*.
-2. **Step-aware rules** — if `step_int` exists, the run is considered a *checkup* if:
+1. **Cycling keywords (override)** — if the program name contains any configured `cycling_keywords` (defaults to `cyc`), the run is forced to *cycling* and no checkup heuristics are evaluated.
+2. **Program keywords** — if the filename or program name contains any of the configured `checkup_keywords` (e.g. `cu`, `glu`, `rpt`), the run is marked as a *checkup*.
+3. **Step-aware rules** — if `step_int` exists, the run is considered a *checkup* if:
 
    * `max(step)` ≥ `step_min_required`, and
    * steps `19` and `22` are both present (if enabled).
-3. **Duration rule** — any run shorter than `duration_threshold_minutes` is treated as a *checkup*.
-4. **Otherwise** — it’s a *cycling* run.
+4. **Duration rule** — any run shorter than `duration_threshold_minutes` is treated as a *checkup*.
+5. **Otherwise** — it’s a *cycling* run.
+
+Examples:
+
+* `rul_inhomoSAM_cyc_1C_4OSOC100` → *cycling* even if it contains diagnostic-style steps or short durations because `cyc` matches `cycling_keywords`.
+* `reference_cu_profile` → *checkup* when no cycling keyword is present and the usual keyword/step/duration rules apply.
 
 These parameters can all be customized in `config.yaml` under the `classification:` section.
 
@@ -173,3 +182,9 @@ Additional behavior:
 
 
 ---
+
+## Changelog
+
+- Aggregate all inputs per cell and run the pipeline once per cell to avoid overwriting outputs and to bound memory usage.
+- Add `classification.cycling_keywords` (defaults to `cyc`) to force cycling classification before checkup heuristics.
+- Update documentation and configuration examples to reflect the per-cell batching flow and cycling override.

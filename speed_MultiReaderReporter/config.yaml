@@ -12,6 +12,7 @@ reports:
   mat_variable: "report"   # name of the MATLAB struct variable
 
 classification:
+  cycling_keywords: ["cyc"]              # force cycling when present in program name
   checkup_keywords: ["cu", "glu", "rpt"]
   duration_threshold_minutes: 60    # < 1h → checkup
 

@@ -89,6 +89,7 @@ def main():
         )
 
     for cell_id, items in sorted(items_by_cell.items()):
+        # Load all raw inputs for the same cell together so one pipeline run handles the aggregated data.
         cell_runs = []
         if verbose:
             print(f"[cell] {cell_id}: loading {len(items)} item(s)")
