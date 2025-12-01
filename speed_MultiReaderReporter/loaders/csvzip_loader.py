@@ -13,6 +13,11 @@ def _cell_from_name(fname: str) -> str:
     eqs = [m.start() for m in re.finditer(r"=", base)]
     return base[eqs[0] + 1:eqs[1]].strip() if len(eqs) >= 2 else Path(base).stem
 
+
+def infer_cell_from_path(path: Path) -> str:
+    """Public helper to infer the cell id from a CSV/ZIP path."""
+    return _cell_from_name(path.name)
+
 def _program_from_name(fname: str) -> str:
     parts = Path(fname).name.split("=")
     return parts[5].strip() if len(parts) >= 7 else Path(fname).stem
