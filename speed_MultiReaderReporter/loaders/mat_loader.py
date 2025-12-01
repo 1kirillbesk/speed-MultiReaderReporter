@@ -56,6 +56,11 @@ def _program_from_path(p: Path) -> str:
     parts = p.stem.split("=")
     return parts[5].strip() if len(parts) > 5 else ""
 
+
+def infer_cell_from_path(path: Path) -> str:
+    """Public helper to infer the cell id from a MAT path."""
+    return _cell_from_path(path)
+
 # ---- normalize to canonical dataframe ----
 def _df_from_mat(path: Path) -> pd.DataFrame:
     a = _try_fast_diga_arrays(path)

@@ -5,7 +5,7 @@ import zipfile
 from dataclasses import dataclass
 from typing import Literal
 
-DetectedKind = Literal["mat", "csvzip", "csv", "unknown"]
+DetectedKind = Literal["mat", "csvzip", "csv", "pkl", "unknown"]
 
 @dataclass(frozen=True)
 class DetectedItem:
@@ -47,7 +47,7 @@ def detect_kind(p: Path) -> DetectedKind:
 def discover_inputs(root: Path, recurse: bool = True) -> list[DetectedItem]:
     """
     If 'root' is a file -> return that one item (if known).
-    If 'root' is a folder -> walk (optionally recursively) and collect .mat/.csv/.zip(with csv).
+    If 'root' is a folder -> walk (optionally recursively) and collect .mat/.csv/.zip(with csv)/.pkl.
     """
     items: list[DetectedItem] = []
     if root.is_file():

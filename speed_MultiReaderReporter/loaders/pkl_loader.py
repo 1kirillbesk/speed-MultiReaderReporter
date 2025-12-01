@@ -53,6 +53,11 @@ def _program_from_path(p: Path) -> str:
     """Simplified program name extraction for .pkl (usually rpt id)."""
     return p.stem
 
+
+def infer_cell_from_path(path: Path) -> str:
+    """Public helper to infer the cell id from a PKL path."""
+    return _cell_from_path(path)
+
 def load(path: Path, cfg: dict, out_root: Path) -> list[RunRecord]:
     df = _df_from_pkl(path)
     return [RunRecord(
