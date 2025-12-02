@@ -2,10 +2,11 @@
 from __future__ import annotations
 from pathlib import Path
 import zipfile, io, re, logging
+from typing import Iterable
 import pandas as pd
 
-from core.normalize import parse_columns, to_abs_time, to_float, to_str
-from core.model import RunRecord
+from ..core.normalize import parse_columns, to_abs_time, to_float, to_str
+from ..core.model import RunRecord
 
 _LOG = logging.getLogger(__name__)
 
@@ -52,8 +53,18 @@ def _df_from_csv_bytes(buff: bytes) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def _pulse_keywords(cfg: dict | None) -> tuple[str, ...]:
+    cls = (cfg or {}).get("classification", {}) if cfg else {}
+    kws = cls.get("procedure_pulse_keywords")
+    if isinstance(kws, Iterable) and not isinstance(kws, (str, bytes)):
+        lowered = tuple(str(k).lower() for k in kws if str(k).strip())
+        if lowered:
+            return lowered
+    return ("pulse",)
+
+
 def _segment_by_procedure(df: pd.DataFrame, cell: str, program: str,
-                          source_path: Path, loader: str) -> list[RunRecord]:
+                          source_path: Path, loader: str, cfg: dict | None) -> list[RunRecord]:
     """
     Some CSVs contain nested procedures in a ``Prozedur`` column. When multiple
     contiguous procedure blocks are present, emit one RunRecord per block so the
@@ -63,33 +74,51 @@ def _segment_by_procedure(df: pd.DataFrame, cell: str, program: str,
     if proc_col is None:
         return [RunRecord(cell=cell, program=program, df=df, source_path=source_path, loader=loader)]
 
-    unique_proc = df[proc_col].dropna().unique()
+    proc_series_raw = df[proc_col].apply(lambda v: "" if pd.isna(v) else str(v).strip())
+    proc_series_raw = proc_series_raw.replace({"nan": ""})
+
+    unique_proc = pd.Series([p for p in proc_series_raw if p]).unique()
     if unique_proc.size <= 1:
+        return [RunRecord(cell=cell, program=program, df=df, source_path=source_path, loader=loader)]
+
+    pulse_kws = _pulse_keywords(cfg)
+    effective_proc = pd.Series(pd.NA, index=df.index, dtype="object")
+    active_proc: str | None = None
+    pulse_attached = False
+
+    for idx, proc in proc_series_raw.items():
+        proc_lower = proc.lower()
+        is_pulse = any(k in proc_lower for k in pulse_kws) if proc else False
+
+        if proc and not is_pulse:
+            active_proc = proc
+            effective_proc.iloc[idx] = active_proc
+        elif is_pulse and active_proc is not None:
+            effective_proc.iloc[idx] = active_proc
+            pulse_attached = True
+        else:
+            active_proc = None
+
+    effective_df = df.copy()
+    effective_df["effective_procedure"] = effective_proc
+    effective_df = effective_df.dropna(subset=["effective_procedure"]).reset_index(drop=True)
+
+    if effective_df.empty:
         return [RunRecord(cell=cell, program=program, df=df, source_path=source_path, loader=loader)]
 
     segments: list[RunRecord] = []
     current_proc = None
     start_idx = None
-    proc_series = df[proc_col]
+    proc_series = effective_df["effective_procedure"]
 
-    for idx, proc in enumerate(proc_series):
-        if pd.isna(proc):
-            if current_proc is not None and start_idx is not None:
-                block = df.iloc[start_idx:idx].copy()
-                if not block.empty:
-                    segments.append(RunRecord(cell=cell, program=str(current_proc),
-                                              df=block, source_path=source_path, loader=loader))
-                current_proc = None
-                start_idx = None
-            continue
-
+    for idx, proc in proc_series.items():
         if current_proc is None:
             current_proc = proc
             start_idx = idx
             continue
 
         if proc != current_proc:
-            block = df.iloc[start_idx:idx].copy()
+            block = effective_df.iloc[start_idx:idx].copy().drop(columns=["effective_procedure"], errors="ignore")
             if not block.empty:
                 segments.append(RunRecord(cell=cell, program=str(current_proc),
                                           df=block, source_path=source_path, loader=loader))
@@ -97,13 +126,16 @@ def _segment_by_procedure(df: pd.DataFrame, cell: str, program: str,
             start_idx = idx
 
     if current_proc is not None and start_idx is not None:
-        block = df.iloc[start_idx:].copy()
+        block = effective_df.iloc[start_idx:].copy().drop(columns=["effective_procedure"], errors="ignore")
         if not block.empty:
             segments.append(RunRecord(cell=cell, program=str(current_proc),
                                       df=block, source_path=source_path, loader=loader))
 
     if segments:
         _LOG.info("SPLIT %s into %d Prozedur segments for cell %s", source_path.name, len(segments), cell)
+        if pulse_attached:
+            _LOG.info("[SPLIT] merged pulse procedures into main procedures for file %s, produced %d runs.",
+                      source_path.name, len(segments))
         return segments
 
     return [RunRecord(cell=cell, program=program, df=df, source_path=source_path, loader=loader)]
@@ -121,7 +153,7 @@ def load(path: Path, cfg: dict, out_root: Path) -> list[RunRecord]:
         df = _df_from_csv_bytes(path.read_bytes())
         cell = _cell_from_name(path.name)
         program = _program_from_name(path.name)
-        records.extend(_segment_by_procedure(df, cell, program, path, "csvzip"))
+        records.extend(_segment_by_procedure(df, cell, program, path, "csvzip", cfg))
         return records
 
     # zip with CSVs
@@ -137,5 +169,5 @@ def load(path: Path, cfg: dict, out_root: Path) -> list[RunRecord]:
                 df = _df_from_csv_bytes(raw)
             except Exception:
                 continue
-            records.extend(_segment_by_procedure(df, cell, program, path, "csvzip"))
+            records.extend(_segment_by_procedure(df, cell, program, path, "csvzip", cfg))
     return records
