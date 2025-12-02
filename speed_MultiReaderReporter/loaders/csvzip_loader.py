@@ -86,9 +86,20 @@ def _segment_by_procedure(df: pd.DataFrame, cell: str, program: str,
     active_proc: str | None = None
     pulse_attached = False
 
+    program_lower = program.lower() if isinstance(program, str) else None
+    ignored_top_level_pulse = False
+
     for idx, proc in proc_series_raw.items():
         proc_lower = proc.lower()
-        is_pulse = any(k in proc_lower for k in pulse_kws) if proc else False
+        contains_pulse = any(k in proc_lower for k in pulse_kws) if proc else False
+        is_top_level_program = program_lower is not None and proc_lower == program_lower
+        if contains_pulse and is_top_level_program:
+            if not ignored_top_level_pulse:
+                _LOG.debug("[PULSE] Ignored pulse keyword in top-level program name %s (not a helper procedure)", proc)
+                ignored_top_level_pulse = True
+            is_pulse = False
+        else:
+            is_pulse = contains_pulse
 
         if proc and not is_pulse:
             active_proc = proc
