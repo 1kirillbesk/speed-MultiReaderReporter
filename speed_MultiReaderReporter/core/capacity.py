@@ -1,7 +1,18 @@
 # speed_MultiReaderReporter/core/capacity.py
 from __future__ import annotations
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
+
+
+@dataclass
+class Step19Result:
+    capacity_Ah: float
+    discharge_end_time: pd.Timestamp
+    index_start: int
+    index_end: int
+    discharge_start_time: pd.Timestamp
+    min_voltage_V: float | None
 
 def capacity_for_step_Ah(g: pd.DataFrame, step_target: int, *,
                          want_negative: bool = True,
@@ -49,7 +60,7 @@ def capacity_for_step_Ah(g: pd.DataFrame, step_target: int, *,
 def compute_checkup_point_step19(g: pd.DataFrame, *,
                                  min_step_required: int = 20,
                                  eod_v_cut: float | None = None,
-                                 i_thresh: float = 0.0) -> tuple[float, pd.Timestamp] | None:
+                                 i_thresh: float = 0.0) -> Step19Result | None:
     if g.empty or "step_int" not in g.columns:
         return None
     gg = g.sort_values("abs_time").copy()
@@ -66,4 +77,20 @@ def compute_checkup_point_step19(g: pd.DataFrame, *,
     if not has22_after:
         return None
     t_end = gg["abs_time"].iloc[b19]
-    return cap_ah, t_end
+    t_start = gg["abs_time"].iloc[a19]
+
+    min_v = None
+    if "voltage_V" in gg.columns:
+        vseg = gg["voltage_V"].to_numpy(float)[a19:b19+1]
+        finite = vseg[np.isfinite(vseg)]
+        if finite.size:
+            min_v = float(np.min(finite))
+
+    return Step19Result(
+        capacity_Ah=cap_ah,
+        discharge_end_time=t_end,
+        index_start=a19,
+        index_end=b19,
+        discharge_start_time=t_start,
+        min_voltage_V=min_v,
+    )

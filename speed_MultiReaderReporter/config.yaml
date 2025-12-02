@@ -20,6 +20,7 @@ soh:
   min_step_required: 20    # guard for step-19 logic
   i_thresh_A: 0.0          # ignore |I| below this when integrating step-19
   eod_v_cut_V: null        # set (e.g., 3.0) if you want early cutoff by voltage
+  export_data: true        # export the underlying SoH scatter data alongside the plot
 
 legend:
   ncol: 4
