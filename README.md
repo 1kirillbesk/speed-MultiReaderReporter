@@ -24,7 +24,7 @@ SPEED MultiReaderReporter automatically:
   - Strom-vs-Zeit and Spannung-vs-Zeit plots for total, checkup, and cycling data
   - Throughput and current statistics (`report.csv` or `.mat`)
   - Optional **checkup-segment breakdowns** that split pauses into voltage-defined groups
-  - Optional **SoH plots**: discharge capacity (step-19) vs cumulative charge throughput
+  - Optional **SoH plots**: discharge capacity from CU (step-19) and RPT (step-6) checkups vs cumulative charge throughput
 
 Everything — input locations, classification rules, report format, and thresholds — is controlled through a single YAML configuration file.
 
@@ -69,6 +69,10 @@ soh:
   i_thresh_A: 0.0
   eod_v_cut_V: null                        # cutoff voltage (optional)
   export_data: true                        # also export the scatter data as CSV
+  include_rpt: true                        # also include RPT checkups (step-6 discharge) in SoH
+  rpt_min_step_required: null              # optional guard; leave null to skip the max-step check for RPT
+  rpt_trailing_step_id: null               # reserved for future: require a step after the discharge
+  rpt_require_trailing_step: false
 
 legend:
   ncol: 4                                  # legend columns on plots
@@ -128,8 +132,9 @@ out/<CELL_NAME>/
 * The `out/` folder itself remains tracked in Git, but its contents are ignored (to avoid committing large data).
 
 When SoH plotting is enabled, the underlying scatter data are also exported to `soh_scatter_data.csv` (one row per plotted
-point) with columns such as `cell_id`, `program_name`, `throughput_Ah`, `discharge_capacity_Ah`, and timestamps for the
-step-19 discharge segment. This makes it easy to recreate or customize the SoH plot externally.
+point) with columns such as `cell_id`, `program_name`, `source_type` (`CU` or `RPT`), `step_id`, `throughput_Ah`,
+`discharge_capacity_Ah`, and timestamps for the discharge segment. Legacy `step19_*` columns remain populated for CU points so
+existing tooling keeps working. This makes it easy to recreate or customize the SoH plot externally.
 
 ---
 
