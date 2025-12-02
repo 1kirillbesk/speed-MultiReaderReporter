@@ -5,8 +5,8 @@ import zipfile, io, re, logging
 from typing import Iterable
 import pandas as pd
 
-from ..core.normalize import parse_columns, to_abs_time, to_float, to_str
-from ..core.model import RunRecord
+from core.normalize import parse_columns, to_abs_time, to_float, to_str
+from core.model import RunRecord
 
 _LOG = logging.getLogger(__name__)
 
