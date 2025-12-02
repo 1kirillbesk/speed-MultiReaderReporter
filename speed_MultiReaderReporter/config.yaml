@@ -21,6 +21,10 @@ soh:
   i_thresh_A: 0.0          # ignore |I| below this when integrating step-19
   eod_v_cut_V: null        # set (e.g., 3.0) if you want early cutoff by voltage
   export_data: true        # export the underlying SoH scatter data alongside the plot
+  include_rpt: true        # include RPT checkups (step-6) in SoH
+  rpt_min_step_required: null
+  rpt_trailing_step_id: null
+  rpt_require_trailing_step: false
 
 legend:
   ncol: 4

@@ -6,13 +6,14 @@ import pandas as pd
 
 
 @dataclass
-class Step19Result:
+class StepCapacityResult:
     capacity_Ah: float
     discharge_end_time: pd.Timestamp
     index_start: int
     index_end: int
     discharge_start_time: pd.Timestamp
     min_voltage_V: float | None
+    step_id: int
 
 def capacity_for_step_Ah(g: pd.DataFrame, step_target: int, *,
                          want_negative: bool = True,
@@ -57,40 +58,82 @@ def capacity_for_step_Ah(g: pd.DataFrame, step_target: int, *,
         if abs(cap) > abs(best[0]): best = (cap, a, end)
     return best
 
-def compute_checkup_point_step19(g: pd.DataFrame, *,
-                                 min_step_required: int = 20,
-                                 eod_v_cut: float | None = None,
-                                 i_thresh: float = 0.0) -> Step19Result | None:
+def compute_checkup_point_step(g: pd.DataFrame, step_target: int, *,
+                               min_step_required: int | None = 20,
+                               eod_v_cut: float | None = None,
+                               i_thresh: float = 0.0,
+                               trailing_step_id: int | None = None,
+                               require_trailing_step: bool = False) -> StepCapacityResult | None:
     if g.empty or "step_int" not in g.columns:
         return None
     gg = g.sort_values("abs_time").copy()
     steps_raw = gg["step_int"].to_numpy()
     steps = np.where(steps_raw == 9999, np.nan, steps_raw)
     finite = steps[np.isfinite(steps)]
-    if finite.size == 0 or int(np.nanmax(finite)) < min_step_required:
+    if min_step_required is not None:
+        if finite.size == 0 or int(np.nanmax(finite)) < min_step_required:
+            return None
+    cap_ah, a_step, b_step = capacity_for_step_Ah(
+        gg,
+        step_target,
+        want_negative=True,
+        eod_v_cut=eod_v_cut,
+        i_thresh=i_thresh,
+    )
+    if a_step is None or b_step is None or cap_ah <= 1e-4:
         return None
-    cap_ah, a19, b19 = capacity_for_step_Ah(gg, 19, want_negative=True,
-                                            eod_v_cut=eod_v_cut, i_thresh=i_thresh)
-    if a19 is None or b19 is None or cap_ah <= 1e-4:
-        return None
-    has22_after = np.any((steps == 22) & (np.arange(len(steps)) > b19))
-    if not has22_after:
-        return None
-    t_end = gg["abs_time"].iloc[b19]
-    t_start = gg["abs_time"].iloc[a19]
+    if require_trailing_step and trailing_step_id is not None:
+        has_trailing_after = np.any((steps == trailing_step_id) & (np.arange(len(steps)) > b_step))
+        if not has_trailing_after:
+            return None
+    t_end = gg["abs_time"].iloc[b_step]
+    t_start = gg["abs_time"].iloc[a_step]
 
     min_v = None
     if "voltage_V" in gg.columns:
-        vseg = gg["voltage_V"].to_numpy(float)[a19:b19+1]
+        vseg = gg["voltage_V"].to_numpy(float)[a_step:b_step+1]
         finite = vseg[np.isfinite(vseg)]
         if finite.size:
             min_v = float(np.min(finite))
 
-    return Step19Result(
+    return StepCapacityResult(
         capacity_Ah=cap_ah,
         discharge_end_time=t_end,
-        index_start=a19,
-        index_end=b19,
+        index_start=a_step,
+        index_end=b_step,
         discharge_start_time=t_start,
         min_voltage_V=min_v,
+        step_id=step_target,
+    )
+
+
+def compute_checkup_point_step19(g: pd.DataFrame, *,
+                                 min_step_required: int = 20,
+                                 eod_v_cut: float | None = None,
+                                 i_thresh: float = 0.0) -> StepCapacityResult | None:
+    return compute_checkup_point_step(
+        g,
+        19,
+        min_step_required=min_step_required,
+        eod_v_cut=eod_v_cut,
+        i_thresh=i_thresh,
+        trailing_step_id=22,
+        require_trailing_step=True,
+    )
+
+
+def compute_checkup_point_step6(g: pd.DataFrame, *,
+                                min_step_required: int | None = None,
+                                eod_v_cut: float | None = None,
+                                i_thresh: float = 0.0,
+                                trailing_step_id: int | None = None,
+                                require_trailing_step: bool = False) -> StepCapacityResult | None:
+    return compute_checkup_point_step(
+        g,
+        6,
+        min_step_required=min_step_required,
+        eod_v_cut=eod_v_cut,
+        i_thresh=i_thresh,
+        trailing_step_id=trailing_step_id,
+        require_trailing_step=require_trailing_step,
     )

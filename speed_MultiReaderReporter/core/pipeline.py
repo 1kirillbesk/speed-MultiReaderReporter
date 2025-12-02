@@ -7,7 +7,7 @@ import pandas as pd
 from .classify import is_checkup_run, configure_from_config
 from .plotting import save_group_plot, save_grouped_checkup_plot
 from .reports import write_report, write_grouped_report
-from .capacity import compute_checkup_point_step19
+from .capacity import compute_checkup_point_step19, compute_checkup_point_step6
 from .soh import cumulative_throughput_until
 from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
@@ -100,36 +100,66 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                     mat_variable=mat_var if fmt != "csv" else "report_grouped",
                 )
 
-        # SoH: step-19 capacity vs cumulative throughput (checkups only; need step_int)
+        # SoH: checkup discharge capacity vs cumulative throughput (step-19 for CU, step-6 for RPT)
         soh_points = []
         soh_rows = []
         soh_cfg = cfg.get("soh", {})
         export_soh_data = bool(soh_cfg.get("export_data", True))
+        include_rpt = bool(soh_cfg.get("include_rpt", True))
+        rpt_min_step = soh_cfg.get("rpt_min_step_required", None)
+        if rpt_min_step is not None:
+            rpt_min_step = int(rpt_min_step)
+        rpt_trailing_step = soh_cfg.get("rpt_trailing_step_id", None)
+        if rpt_trailing_step is not None:
+            rpt_trailing_step = int(rpt_trailing_step)
+
         for df_chk, lbl_chk in checkup_list:
-            if "cu" not in lbl_chk.lower():  # your rule of thumb
-                continue
-            if "step_int" not in df_chk.columns:
-                continue
-            res = compute_checkup_point_step19(
-                df_chk,
-                min_step_required=int(soh_cfg.get("min_step_required", 20)),
-                eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
-                i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
-            )
+            label_lower = lbl_chk.lower()
+            res = None
+            source_type = None
+            if "cu" in label_lower:
+                if "step_int" not in df_chk.columns:
+                    continue
+                res = compute_checkup_point_step19(
+                    df_chk,
+                    min_step_required=int(soh_cfg.get("min_step_required", 20)),
+                    eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                    i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                )
+                source_type = "CU"
+            elif include_rpt and "rpt" in label_lower:
+                if "step_int" not in df_chk.columns:
+                    continue
+                res = compute_checkup_point_step6(
+                    df_chk,
+                    min_step_required=rpt_min_step,
+                    eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                    i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                    trailing_step_id=rpt_trailing_step,
+                    require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                )
+                source_type = "RPT"
             if res is None:
                 continue
             x_thru = cumulative_throughput_until(total_list, res.discharge_end_time)
-            soh_points.append((x_thru, res.capacity_Ah, lbl_chk, res.discharge_end_time))
+            soh_points.append((x_thru, res.capacity_Ah, lbl_chk, res.discharge_end_time, source_type))
+            if source_type == "RPT":
+                print(f"[INFO] Added RPT SoH point for cell {cell}, step 6 discharge capacity = {res.capacity_Ah:.4f} Ah")
             soh_rows.append({
                 "cell_id": cell,
                 "program_name": lbl_chk,
+                "source_type": source_type,
+                "step_id": res.step_id,
                 "discharge_end_time": res.discharge_end_time,
                 "discharge_start_time": res.discharge_start_time,
                 "throughput_Ah": x_thru,
                 "discharge_capacity_Ah": res.capacity_Ah,
-                "step19_start_index": res.index_start,
-                "step19_end_index": res.index_end,
-                "step19_min_voltage_V": res.min_voltage_V,
+                "step_start_index": res.index_start,
+                "step_end_index": res.index_end,
+                "step_min_voltage_V": res.min_voltage_V,
+                "step19_start_index": res.index_start if res.step_id == 19 else None,
+                "step19_end_index": res.index_end if res.step_id == 19 else None,
+                "step19_min_voltage_V": res.min_voltage_V if res.step_id == 19 else None,
             })
 
         if soh_points:
@@ -152,11 +182,11 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             for x, y, name in zip(xs, ys, df_soh["program_name"].to_list()):
                 plt.annotate(name, (x, y), fontsize=8, xytext=(5, 2), textcoords="offset points")
             plt.xlabel("Cumulative charge throughput up to discharge [Ah]")
-            plt.ylabel("Discharge capacity (step 19) [Ah]")
+            plt.ylabel("Discharge capacity (checkup) [Ah]")
             plt.title(f"Cell: {cell} — SoH: Capacity vs Throughput")
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
             plt.savefig(cell_dir / "checkup" / "soh_discharge_capacity_vs_throughput.png", dpi=160)
             plt.close()
         else:
-            print(f"[INFO] {cell}: no valid step-19 discharges found for SoH plot.")
+            print(f"[INFO] {cell}: no valid checkup discharges found for SoH plot.")
