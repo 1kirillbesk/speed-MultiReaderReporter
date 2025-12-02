@@ -6,6 +6,7 @@ import unittest
 from speed_MultiReaderReporter.core.classify import configure_from_config, is_checkup_run
 from speed_MultiReaderReporter.core.model import RunRecord
 from speed_MultiReaderReporter.core.pipeline import run_pipeline
+from speed_MultiReaderReporter.loaders.csvzip_loader import _segment_by_procedure
 
 
 def _make_df(step_values, start="2024-01-01 00:00:00", freq="10min"):
@@ -75,3 +76,42 @@ class PipelineGroupingTests(unittest.TestCase):
             # Ensure checkup run grouped correctly
             df_chk = pd.read_csv(checkup_report)
             self.assertIn("demo_cu", df_chk["program"].tolist())
+
+
+class ProcedureSegmentationTests(unittest.TestCase):
+    def _df_with_procedure(self, procs):
+        times = pd.date_range(start="2024-01-01 00:00:00", periods=len(procs), freq="1min")
+        return pd.DataFrame({
+            "abs_time": times,
+            "current_A": [0.1] * len(procs),
+            "procedure": procs,
+        })
+
+    def test_pulse_procedures_are_attached_to_active(self):
+        procs = [
+            "rul_CU_main",
+            "rul_CU_main",
+            "rul_Pulse_SAM",
+            "rul_Pulse_SAM",
+            "rul_CU_main",
+        ]
+        df = self._df_with_procedure(procs)
+
+        segments = _segment_by_procedure(df, "CELL_X", "program_stub", Path("file.csv"), "csvzip", cfg={})
+
+        self.assertEqual(1, len(segments))
+        self.assertEqual("rul_CU_main", segments[0].program)
+        self.assertEqual(len(procs), len(segments[0].df))
+
+    def test_multiple_programs_with_pulses_split_cleanly(self):
+        procs = ["checkup", "checkup", "helper_pulse", "cycling", "cycling"]
+        df = self._df_with_procedure(procs)
+
+        cfg = {"classification": {"procedure_pulse_keywords": ["pulse"]}}
+        segments = _segment_by_procedure(df, "CELL_Y", "program_stub", Path("file.csv"), "csvzip", cfg)
+
+        self.assertEqual(2, len(segments))
+        self.assertEqual("checkup", segments[0].program)
+        self.assertEqual(3, len(segments[0].df))
+        self.assertEqual("cycling", segments[1].program)
+        self.assertEqual(2, len(segments[1].df))
