@@ -102,6 +102,9 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
         # SoH: step-19 capacity vs cumulative throughput (checkups only; need step_int)
         soh_points = []
+        soh_rows = []
+        soh_cfg = cfg.get("soh", {})
+        export_soh_data = bool(soh_cfg.get("export_data", True))
         for df_chk, lbl_chk in checkup_list:
             if "cu" not in lbl_chk.lower():  # your rule of thumb
                 continue
@@ -109,27 +112,44 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                 continue
             res = compute_checkup_point_step19(
                 df_chk,
-                min_step_required=int(cfg.get("soh", {}).get("min_step_required", 20)),
-                eod_v_cut=cfg.get("soh", {}).get("eod_v_cut_V", None),
-                i_thresh=float(cfg.get("soh", {}).get("i_thresh_A", 0.0)),
+                min_step_required=int(soh_cfg.get("min_step_required", 20)),
+                eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
             )
             if res is None:
                 continue
-            cap_ah, t_end = res
-            x_thru = cumulative_throughput_until(total_list, t_end)
-            soh_points.append((x_thru, cap_ah, lbl_chk, t_end))
+            x_thru = cumulative_throughput_until(total_list, res.discharge_end_time)
+            soh_points.append((x_thru, res.capacity_Ah, lbl_chk, res.discharge_end_time))
+            soh_rows.append({
+                "cell_id": cell,
+                "program_name": lbl_chk,
+                "discharge_end_time": res.discharge_end_time,
+                "discharge_start_time": res.discharge_start_time,
+                "throughput_Ah": x_thru,
+                "discharge_capacity_Ah": res.capacity_Ah,
+                "step19_start_index": res.index_start,
+                "step19_end_index": res.index_end,
+                "step19_min_voltage_V": res.min_voltage_V,
+            })
 
         if soh_points:
-            df_soh = pd.DataFrame(soh_points, columns=[
-                "throughput_Ah", "discharge_capacity_Ah", "program", "discharge_end_time"
-            ])
-            df_soh.to_csv(cell_dir / "checkup" / "soh_discharge_capacity_vs_throughput.csv", index=False)
+            df_soh = pd.DataFrame(soh_rows)
+            soh_dir = cell_dir / "checkup"
+            if export_soh_data:
+                soh_data_path = soh_dir / "soh_scatter_data.csv"
+                df_soh.to_csv(soh_data_path, index=False)
+                print(f"[OK] wrote SoH data: {soh_data_path}")
+
+            legacy_df = df_soh.rename(columns={"program_name": "program"})[
+                ["throughput_Ah", "discharge_capacity_Ah", "program", "discharge_end_time"]
+            ]
+            legacy_df.to_csv(soh_dir / "soh_discharge_capacity_vs_throughput.csv", index=False)
             # simple scatter
             import matplotlib.pyplot as plt
             plt.figure(figsize=(8, 5))
-            xs = [p[0] for p in soh_points]; ys = [p[1] for p in soh_points]
+            xs = df_soh["throughput_Ah"].to_list(); ys = df_soh["discharge_capacity_Ah"].to_list()
             plt.scatter(xs, ys)
-            for x, y, name, _ in soh_points:
+            for x, y, name in zip(xs, ys, df_soh["program_name"].to_list()):
                 plt.annotate(name, (x, y), fontsize=8, xytext=(5, 2), textcoords="offset points")
             plt.xlabel("Cumulative charge throughput up to discharge [Ah]")
             plt.ylabel("Discharge capacity (step 19) [Ah]")

@@ -68,6 +68,7 @@ soh:
   min_step_required: 20
   i_thresh_A: 0.0
   eod_v_cut_V: null                        # cutoff voltage (optional)
+  export_data: true                        # also export the scatter data as CSV
 
 legend:
   ncol: 4                                  # legend columns on plots
@@ -115,6 +116,7 @@ out/<CELL_NAME>/
     report.csv or report.mat
     groups/
       strom_vs_zeit_[group-index].png         # if grouping plots are enabled
+    soh_scatter_data.csv                      # raw SoH scatter points + metadata
     soh_discharge_capacity_vs_throughput.csv
     soh_discharge_capacity_vs_throughput.png
   cycling/
@@ -124,6 +126,10 @@ out/<CELL_NAME>/
 
 * `CELL_NAME` is automatically extracted between the **first and second `=`** in each filename.
 * The `out/` folder itself remains tracked in Git, but its contents are ignored (to avoid committing large data).
+
+When SoH plotting is enabled, the underlying scatter data are also exported to `soh_scatter_data.csv` (one row per plotted
+point) with columns such as `cell_id`, `program_name`, `throughput_Ah`, `discharge_capacity_Ah`, and timestamps for the
+step-19 discharge segment. This makes it easy to recreate or customize the SoH plot externally.
 
 ---
 
