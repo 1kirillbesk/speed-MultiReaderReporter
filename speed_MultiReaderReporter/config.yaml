@@ -1,11 +1,11 @@
 # speed_MultiReaderReporter/config.yaml
 
 input:
-  path: "../data"          # folder OR single file; detector will recurse if it's a folder
+  path: "C:/Users/Public/Documents/takedata/Speed/raw_data_csv"          # folder OR single file; detector will recurse if it's a folder
   recurse: true
 
 output:
-  root: "./out"           # main pipeline will create per-cell subfolders under here
+  root: "C:/Users/Public/Documents/takedata/Speed/out_lw"           # main pipeline will create per-cell subfolders under here
 
 reports:
   format: "csv"    # one of: csv | mat | both
@@ -13,7 +13,7 @@ reports:
 
 classification:
   cycling_keywords: ["cyc"]              # force cycling when present in program name
-  checkup_keywords: ["cu", "glu", "rpt"]
+  checkup_keywords: ["lw_cu", "lw_rpt"]
   duration_threshold_minutes: 60    # < 1h → checkup
 
 soh:
@@ -46,4 +46,3 @@ checkup_grouping:
 
   # Optional: limit plotted points per segment (for speed)
   plot_max_points_per_segment: 5000
-
