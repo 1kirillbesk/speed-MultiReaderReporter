@@ -17,7 +17,7 @@ classification:
   cycling_keywords: ["cyc"]              # force cycling when present in program name
   checkup_keywords: ["lw_cu", "lw_rpt"]
   duration_threshold_minutes: 60    # < 1h → checkup
-  rpt_keywords: ["lw_rpt",]
+  rpt_keywords: ["lw_rpt","lw_cu"]
   cu_keyword: "lw_cu"
 
 
@@ -41,10 +41,10 @@ voltage:
   low: 2
 
 CU_steps:
-  ocv_cha: 9
-  ocv_dis: 6
-  capa_cha: 2
-  capa_dis: 17
+  ocv_cha: [9, 22]
+  ocv_dis: [6, 19]
+  capa_cha: [2, 15]
+  capa_dis: [17, 9]
 
 logging:
   verbose: true

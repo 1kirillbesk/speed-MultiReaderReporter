@@ -295,7 +295,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                 "VdisT", "dTdV", "T_intV"
             ], errors="ignore")
 
-            cell_feature_dir = cell_dir / "cell_feature"
+            cell_feature_dir = out_root / "cell_feature"
             cell_feature_dir.mkdir(parents=True, exist_ok=True)
             summary_path = cell_feature_dir / f"{cell}.csv"
             df_summary.to_csv(summary_path, index=False)

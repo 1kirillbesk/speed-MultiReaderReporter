@@ -60,8 +60,8 @@ def split_total_list(cell, total_list,cfg):
     checkup_list, cycling_list = [], []
 
     # keywords
-    rpt_keywords = ("lw_rpt","lw_cu")   # checkups defined ONLY by these in pairing mode
-    cu_keyword = "lw_cu"         # normal mode checkup marker
+    rpt_keywords = tuple(cfg["classification"]["rpt_keywords"])   # checkups defined ONLY by these in pairing mode
+    cu_keyword = cfg["classification"]["cu_keyword"]         # normal mode checkup marker
 
     n = len(total_list)
 
