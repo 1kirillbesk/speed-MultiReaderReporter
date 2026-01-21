@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import yaml
+import matplotlib.pyplot as plt
 
 from loaders import csvzip_loader, mat_loader, pkl_loader
 from utils.detect import discover_inputs
@@ -36,6 +37,14 @@ def main():
 
     # ---------- discover ----------
     detected = discover_inputs(in_path, recurse=recurse)
+    name_contains = cfg.get("input", {}).get("name_contains", [])
+    needles = [n.lower() for n in name_contains]
+    if needles:
+        detected = [
+            d for d in detected
+            if any(n in d.path.name.lower() for n in needles)
+        ]
+
     if not detected:
         print(f"[INFO] No MAT/CSV/ZIP(CSV) inputs found under: {in_path}")
         sys.exit(0)

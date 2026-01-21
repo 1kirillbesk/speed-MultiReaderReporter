@@ -49,6 +49,11 @@ def _df_from_csv_bytes(buff: bytes) -> pd.DataFrame:
         cols["state"] = to_str(df[zustand])
     if prozedur_col is not None:
         cols["procedure"] = to_str(df[prozedur_col])
+    cols["qcha"] = to_float(df["AhLad"])
+    cols["qdis"] = to_float(df["AhEla"])
+    cols["qstep"] = to_float(df["AhStep"])
+    cols["T1"] = to_float(df["T1"])
+    cols["Tenv"] = to_float(df["Tenv"])
     out = pd.DataFrame(cols).dropna(subset=["abs_time", "current_A"]).sort_values("abs_time")
     return out.reset_index(drop=True)
 

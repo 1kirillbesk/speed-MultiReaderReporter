@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
+from .capacity import *
 
 def save_group_plot(cell: str, series_list: list, group_dir: Path, title_suffix: str, legend_ncol: int = 4):
     if not series_list:
@@ -168,3 +169,94 @@ def save_grouped_checkup_plot(cell: str,
     plt.close()
     print(f"[OK] grouped voltage plot → {out_path}")
 
+
+def plot_curves(
+    df,
+    cfg,
+    cell,
+    x_col="V",
+    y_col="dQdV",
+    show=False,
+    kmax=5,              # how many maxima markers per row
+    kmin=5,              # how many minima markers per row
+    peak_distance=None,  # passed to find_peaks
+):
+    """
+    Plot curves (one per row) with color blue->red.
+
+    Peak markers are computed FROM THE CURVE using your get_peaks/get_minima:
+      - maxima: top kmax peaks by y
+      - minima: top kmin minima by y (lowest values)
+    Works for both dQdV and dVdQ, because it just uses x_col/y_col arrays.
+
+    Saves to:
+      cfg["output"]["root"]/plots/<y_col>/<cell>.png
+    """
+    n = len(df)
+    cmap = cm.get_cmap("coolwarm")  # blue -> red
+
+    output_dir = cfg["output"]["root"]
+    plot_dir = os.path.join(output_dir, "plots", y_col)
+    os.makedirs(plot_dir, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        x = np.asarray(row.get(x_col, []))
+        y = np.asarray(row.get(y_col, []))
+
+        # ensure 1D
+        x = np.asarray(x).ravel()
+        y = np.asarray(y).ravel()
+
+        # skip invalid curve rows
+        if x.size == 0 or y.size == 0 or x.size != y.size:
+            continue
+
+        color = cmap(i / max(n - 1, 1))
+        ax.plot(x, y, color=color, alpha=0.9)
+
+        # ---- compute maxima/minima from curve ----
+        peaks = get_peaks(x, y, distance=peak_distance)
+        mins  = get_minima(x, y, distance=peak_distance)
+
+        # choose only top-k points
+        px_max, py_max = topk_by_y(peaks["x_peaks"], peaks["y_peaks"], kmax, largest=True)
+        px_min, py_min = topk_by_y(mins["x_peaks"],  mins["y_peaks"],  kmin, largest=False)
+
+        # plot markers
+        if px_max.size > 0:
+            ax.scatter(px_max, py_max, color=color, s=30, marker="x", alpha=0.95, linewidths=1.2)
+        if px_min.size > 0:
+            ax.scatter(px_min, py_min, color=color, s=30, marker="o", alpha=0.75, linewidths=0.8)
+
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+    ax.set_title(f"{y_col} curves (blue = first, red = last)")
+    ax.grid(alpha=0.3)
+
+    sm = cm.ScalarMappable(cmap=cmap)
+    sm.set_array([0, n - 1])
+    cbar = fig.colorbar(sm, ax=ax)
+    cbar.set_label("Row index")
+
+    ax.text(
+        0.01, 0.99,
+        f"Peaks per row: max={kmax}, min={kmin} (distance={peak_distance})",
+        transform=ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=9,
+        bbox=dict(boxstyle="round", alpha=0.15)
+    )
+
+    fig.tight_layout()
+
+    file_path = os.path.join(plot_dir, f"{cell}.png")
+    fig.savefig(file_path, dpi=300, bbox_inches="tight")
+    print(f"Saved plot to: {file_path}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
