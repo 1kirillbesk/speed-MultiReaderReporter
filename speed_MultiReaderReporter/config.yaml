@@ -25,6 +25,12 @@ soh:
   rpt_min_step_required: null
   rpt_trailing_step_id: null
   rpt_require_trailing_step: false
+  rpt_discharge_state_keywords: ["DCH", "DISCH", "DIS", "ENTL"]
+  rpt_min_segment_duration_s: 60
+  rpt_min_capacity_Ah: 1e-4
+  rpt_min_voltage_span_V: null
+  rpt_lock_step_per_cell: true
+  rpt_select_by_voltage_span: true
 
 legend:
   ncol: 4
@@ -46,4 +52,3 @@ checkup_grouping:
 
   # Optional: limit plotted points per segment (for speed)
   plot_max_points_per_segment: 5000
-

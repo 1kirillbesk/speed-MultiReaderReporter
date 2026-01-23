@@ -1,9 +1,10 @@
 # SPEED MultiReaderReporter
 
-**SPEED MultiReaderReporter** is a unified tool for processing and analyzing battery experiment data stored in  
-- **MATLAB `.mat` struct files**,  
-- **CSV files (inside `.zip` archives or standalone)**, and  
-- **Python pickle (`.pkl`) files**.  
+**SPEED MultiReaderReporter** is a unified tool for processing and analyzing battery experiment data stored in
+
+* **MATLAB `.mat` struct files**,
+* **CSV files (inside `.zip` archives or standalone)**, and
+* **Python pickle (`.pkl`) files**.
 
 It standardizes all data into a single format and produces per-cell plots, reports, and optional State-of-Health (SoH) analyses — all **fully configurable through `config.yaml`**. Inputs belonging to the same cell are automatically batched and processed together to keep memory bounded and to prevent plot/report overwrites when multiple raw files exist for one cell.
 
@@ -12,19 +13,23 @@ It standardizes all data into a single format and produces per-cell plots, repor
 ## Overview
 
 SPEED MultiReaderReporter automatically:
-- Detects input file formats (`.mat`, `.csv`, `.zip`, `.pkl`)
-- Loads **all inputs for the same cell together**, processing one cell at a time to bound RAM and isolate outputs
-- Standardizes each dataset into a common structure:
-  - `abs_time` — absolute timestamp  
-  - `current_A` — current in amperes 
-  - `voltage_V` - voltage in volts
-  - (optional) `step_int`
-- Classifies experiments into **checkup** and **cycling**
-- Generates:
-  - Strom-vs-Zeit and Spannung-vs-Zeit plots for total, checkup, and cycling data
-  - Throughput and current statistics (`report.csv` or `.mat`)
-  - Optional **checkup-segment breakdowns** that split pauses into voltage-defined groups
-  - Optional **SoH plots**: discharge capacity from CU (step-19) and RPT (step-6) checkups vs cumulative charge throughput
+
+* Detects input file formats (`.mat`, `.csv`, `.zip`, `.pkl`)
+* Loads **all inputs for the same cell together**, processing one cell at a time to bound RAM and isolate outputs
+* Standardizes each dataset into a common structure:
+
+  * `abs_time` — absolute timestamp
+  * `current_A` — current in amperes
+  * `voltage_V` — voltage in volts
+  * (optional) `step_int` — step index (if present in source)
+  * (optional) `state` — state/action label (e.g. `DCH`, `PAU`, `CHA`, when present in source)
+* Classifies experiments into **checkup** and **cycling**
+* Generates:
+
+  * Strom-vs-Zeit and Spannung-vs-Zeit plots for total, checkup, and cycling data
+  * Throughput and current statistics (`report.csv` or `.mat`)
+  * Optional **checkup-segment breakdowns** that split pauses into voltage-defined groups
+  * Optional **SoH plots**: discharge capacity from CU and RPT checkups vs cumulative charge throughput
 
 Everything — input locations, classification rules, report format, and thresholds — is controlled through a single YAML configuration file.
 
@@ -34,12 +39,12 @@ Everything — input locations, classification rules, report format, and thresho
 
 ### 1️⃣ Install dependencies
 
-You’ll need **Python 3.10+**.  
+You’ll need **Python 3.10+**.
 Install dependencies using:
 
 ```bash
 pip install -r requirements.txt
-````
+```
 
 ### 2️⃣ Configure `config.yaml`
 
@@ -58,18 +63,34 @@ output:
 
 classification:
   cycling_keywords: ["cyc"]                  # Force cycling when present in the name
-  checkup_keywords: ["cu", "glu", "rpt"]   # Keywords to identify checkups
-  duration_threshold_minutes: 60           # < 1 h = checkup
-  step_min_required: 20                    # min step number to consider
-  require_steps_19_22: true                # require both steps 19 & 22
+  checkup_keywords: ["cu", "glu", "rpt"] # Keywords to identify checkups
+  duration_threshold_minutes: 60            # < 1 h = checkup
+  step_min_required: 20                     # min step number to consider
+  require_steps_19_22: true                 # require both steps 19 & 22
   skip_glu: false                          # skip 'glu' keyword if true
 
 soh:
   min_step_required: 20
   i_thresh_A: 0.0
   eod_v_cut_V: null                        # cutoff voltage (optional)
-  export_data: true                        # also export the scatter data as CSV
-  include_rpt: true                        # also include RPT checkups (step-6 discharge) in SoH
+  export_data: true                       # also export the scatter data as CSV
+  include_rpt: true                      # include RPT checkups in SoH
+
+  # --- RPT discharge detection (state-based, with fallback) ---
+  # Prefer discharge segments where the "state" column indicates discharge
+  rpt_discharge_state_keywords: ["DCH", "DISCH", "DIS", "ENTL"]
+
+  # Minimum total discharge duration (seconds) to accept a segment
+  rpt_min_segment_duration_s: 60
+
+  # Minimum discharge capacity (Ah) to accept a segment
+  rpt_min_capacity_Ah: 1e-4
+
+  # Optional: require a minimum voltage span (Vmax - Vmin) for the discharge segment
+  # Useful to avoid selecting short pulse discharges
+  rpt_min_voltage_span_V: null
+
+  # Legacy / fallback behavior
   rpt_min_step_required: null              # optional guard; leave null to skip the max-step check for RPT
   rpt_trailing_step_id: null               # reserved for future: require a step after the discharge
   rpt_require_trailing_step: false
@@ -78,8 +99,8 @@ legend:
   ncol: 4                                  # legend columns on plots
 
 reports:
-  format: "csv"                            # csv | mat | both
-  mat_variable: "report"                   # MATLAB struct variable name
+  format: "csv"                           # csv | mat | both
+  mat_variable: "report"                  # MATLAB struct variable name
 
 logging:
   verbose: true
@@ -133,7 +154,7 @@ out/<CELL_NAME>/
 
 When SoH plotting is enabled, the underlying scatter data are also exported to `soh_scatter_data.csv` (one row per plotted
 point) with columns such as `cell_id`, `program_name`, `source_type` (`CU` or `RPT`), `step_id`, `throughput_Ah`,
-`discharge_capacity_Ah`, and timestamps for the discharge segment. Legacy `step19_*` columns remain populated for CU points so
+`discharge_capacity_Ah`, and timestamps for the detected discharge segment. Legacy `step19_*` columns remain populated for CU points so
 existing tooling keeps working. This makes it easy to recreate or customize the SoH plot externally.
 
 ---
@@ -143,12 +164,16 @@ existing tooling keeps working. This makes it easy to recreate or customize the 
 The classification logic uses a combination of:
 
 1. **Cycling keywords (override)** — if the program name contains any configured `cycling_keywords` (defaults to `cyc`), the run is forced to *cycling* and no checkup heuristics are evaluated.
+
 2. **Program keywords** — if the filename or program name contains any of the configured `checkup_keywords` (e.g. `cu`, `glu`, `rpt`), the run is marked as a *checkup*.
+
 3. **Step-aware rules** — if `step_int` exists, the run is considered a *checkup* if:
 
    * `max(step)` ≥ `step_min_required`, and
    * steps `19` and `22` are both present (if enabled).
+
 4. **Duration rule** — any run shorter than `duration_threshold_minutes` is treated as a *checkup*.
+
 5. **Otherwise** — it’s a *cycling* run.
 
 Examples:
@@ -160,20 +185,47 @@ These parameters can all be customized in `config.yaml` under the `classificatio
 
 ---
 
+## 🧠 SoH Detection Logic (CU vs RPT)
+
+### CU (Capacity-Check Checkups)
+
+* CU points use a **step-based discharge definition** (default: step 19).
+* Discharge capacity is integrated over the discharge step using the configured current threshold and optional voltage cutoff.
+* This behavior preserves compatibility with legacy datasets and tooling.
+
+### RPT (Reference Performance Tests)
+
+RPT protocols often split discharge across **multiple internal steps** or include pulse / pause sequences. To handle this robustly, the tool uses a **state-based discharge detector**:
+
+1. If a `state` column exists, discharge rows are detected by matching configured keywords (default: `DCH`, `DISCH`, `DIS`, `ENTL`).
+2. The algorithm searches for contiguous discharge segments and selects the one that best represents a *full capacity discharge*:
+
+   * Primary criterion: **largest voltage span** (`max(V) - min(V)`)
+   * Secondary criteria: **longest duration**, then **largest integrated capacity**
+3. Capacity is integrated over the selected discharge segment using trapezoidal integration of current vs time.
+
+### Fallback Behavior
+
+If no valid discharge segment can be detected via `state`, the system falls back to the **legacy step-based RPT logic** (default: step 6). This ensures older datasets and minimal inputs still produce SoH output.
+
+All thresholds and keyword lists can be tuned in `config.yaml` under the `soh:` section.
+
+---
+
 ## 🔀 Checkup Grouping & Segment Reports
 
 Some checkups contain repeated pause/charge cycles that need to be evaluated independently.
 The `checkup_grouping` section in `config.yaml` enables automatic segmentation so plots and
 reports reflect those finer-grained groups.
 
-| Key | Description |
-| --- | ----------- |
-| `mode` | `off` (default), `plot`, `report`, or `both`. Controls whether segmentation is calculated, plotted, and/or included in reports. |
-| `pause_label` | Pause state label to anchor each group. Defaults to `PAU`. |
-| `min_points` | Minimum rows per segment; shorter pauses are merged forward. |
-| `voltage_windows` | Acceptable pause-voltage ranges (defaults to `[[1.9, 2.1], [3.55, 3.65]]`). Groups only start when the first pause inside a new step lands within one of these windows. |
-| `require_step_change` | When `true`, segments only start at step changes; the first pause within the new step is selected automatically. |
-| `plot_max_points_per_segment` | Optional decimation for faster plotting of large pauses. |
+| Key                           | Description                                                                                                                                                             |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mode`                        | `off` (default), `plot`, `report`, or `both`. Controls whether segmentation is calculated, plotted, and/or included in reports.                                         |
+| `pause_label`                 | Pause state label to anchor each group. Defaults to `PAU`.                                                                                                              |
+| `min_points`                  | Minimum rows per segment; shorter pauses are merged forward.                                                                                                            |
+| `voltage_windows`             | Acceptable pause-voltage ranges (defaults to `[[1.9, 2.1], [3.55, 3.65]]`). Groups only start when the first pause inside a new step lands within one of these windows. |
+| `require_step_change`         | When `true`, segments only start at step changes; the first pause within the new step is selected automatically.                                                        |
+| `plot_max_points_per_segment` | Optional decimation for faster plotting of large pauses.                                                                                                                |
 
 Additional behavior:
 
@@ -185,17 +237,17 @@ Additional behavior:
 
 ## 🧪 Supported File Types
 
-| Format          | Typical Source              | Loader          | Notes                              |
-| --------------- | --------------------------- | --------------- | ---------------------------------- |
-| `.mat`          | MATLAB `diga.daten` exports | `mat_loader`    | Full support for steps & voltage   |
-| `.zip` / `.csv` | Machine exports             | `csvzip_loader` | Reads absolute time & current      |
-| `.pkl`          | Python pickle RPT exports   | `pkl_loader`    | Treated as checkup runs by default |
-
+| Format          | Typical Source              | Loader          | Notes                                |
+| --------------- | --------------------------- | --------------- | ------------------------------------ |
+| `.mat`          | MATLAB `diga.daten` exports | `mat_loader`    | Full support for steps & voltage     |
+| `.zip` / `.csv` | Machine exports             | `csvzip_loader` | Reads absolute time & current, state |
+| `.pkl`          | Python pickle RPT exports   | `pkl_loader`    | No state/step; uses fallback logic   |
 
 ---
 
 ## Changelog
 
-- Aggregate all inputs per cell and run the pipeline once per cell to avoid overwriting outputs and to bound memory usage.
-- Add `classification.cycling_keywords` (defaults to `cyc`) to force cycling classification before checkup heuristics.
-- Update documentation and configuration examples to reflect the per-cell batching flow and cycling override.
+* Aggregate all inputs per cell and run the pipeline once per cell to avoid overwriting outputs and to bound memory usage.
+* Add `classification.cycling_keywords` (defaults to `cyc`) to force cycling classification before checkup heuristics.
+* Add **state-based RPT SoH detection** with voltage-span selection and step-6 fallback for multi-step RPT protocols.
+* Update documentation and configuration examples to reflect the per-cell batching flow and robust RPT capacity detection.
