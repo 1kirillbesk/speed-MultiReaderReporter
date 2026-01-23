@@ -191,6 +191,18 @@ def compute_checkup_point_step6(g: pd.DataFrame, *,
     )
 
 
+def _dominant_step_id(step_series: pd.Series, start_idx: int, end_idx: int) -> int | None:
+    if start_idx is None or end_idx is None or start_idx > end_idx:
+        return None
+    window = step_series.iloc[start_idx:end_idx + 1]
+    steps = pd.to_numeric(window, errors="coerce")
+    steps = steps[steps != 9999]
+    steps = steps.dropna()
+    if steps.empty:
+        return None
+    return int(steps.mode(dropna=True).iloc[0])
+
+
 def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
                                        discharge_state_keywords: list[str],
                                        min_segment_duration_s: float = 60.0,
@@ -200,9 +212,11 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
                                        eod_v_cut: float | None = None,
                                        i_thresh: float = 0.0,
                                        trailing_step_id: int | None = None,
-                                       require_trailing_step: bool = False) -> StepCapacityResult | None:
+                                       require_trailing_step: bool = False,
+                                       select_by_voltage_span: bool = True
+                                       ) -> tuple[StepCapacityResult | None, int | None]:
     if g.empty or "abs_time" not in g.columns or "current_A" not in g.columns:
-        return None
+        return None, None
     gg = g.sort_values("abs_time").copy()
 
     if min_step_required is not None and "step_int" in gg.columns:
@@ -210,19 +224,19 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
         steps = np.where(steps_raw == 9999, np.nan, steps_raw)
         finite = steps[np.isfinite(steps)]
         if finite.size == 0 or int(np.nanmax(finite)) < min_step_required:
-            return None
+            return None, None
 
     if "state" not in gg.columns:
-        return None
+        return None, None
 
     kws = [str(k).strip().lower() for k in (discharge_state_keywords or []) if str(k).strip()]
     if not kws:
-        return None
+        return None, None
 
     state_vals = gg["state"].apply(lambda v: "" if pd.isna(v) else str(v)).str.lower()
     mask = state_vals.apply(lambda s: any(k in s for k in kws)).to_numpy()
     if not mask.any():
-        return None
+        return None, None
 
     segs, s = [], None
     for k, flag in enumerate(mask):
@@ -235,7 +249,7 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
         segs.append((s, len(mask) - 1))
 
     if not segs:
-        return None
+        return None, None
 
     dt_s = gg["abs_time"].diff().dt.total_seconds().fillna(0.0).to_numpy()
     keep = []
@@ -245,9 +259,11 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
             keep.append((a, b))
 
     if not keep:
-        return None
+        return None, None
 
     best = (0.0, None, None)
+    best_duration = None
+    best_span = None
     for a, b in keep:
         seg_mask = np.zeros(len(gg), dtype=bool)
         seg_mask[a:b + 1] = True
@@ -260,12 +276,31 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
         )
         if a_seg is None or b_seg is None or cap_ah <= min_capacity_Ah:
             continue
-        if abs(cap_ah) > abs(best[0]):
+        duration_s = float(np.sum(dt_s[a_seg:b_seg + 1]))
+        vspan = None
+        if "voltage_V" in gg.columns:
+            vseg = pd.to_numeric(gg["voltage_V"].iloc[a_seg:b_seg + 1], errors="coerce").to_numpy()
+            finite = vseg[np.isfinite(vseg)]
+            if finite.size:
+                vspan = float(np.nanmax(finite) - np.nanmin(finite))
+        if select_by_voltage_span and vspan is not None:
+            if best_span is None or vspan > best_span:
+                best = (cap_ah, a_seg, b_seg)
+                best_span = vspan
+                best_duration = duration_s
+            continue
+        if best_duration is None or duration_s > best_duration:
             best = (cap_ah, a_seg, b_seg)
+            best_duration = duration_s
+            best_span = vspan
+            continue
+        if duration_s == best_duration and abs(cap_ah) > abs(best[0]):
+            best = (cap_ah, a_seg, b_seg)
+            best_span = vspan
 
     cap_ah, a_step, b_step = best
     if a_step is None or b_step is None:
-        return None
+        return None, None
 
     if min_voltage_span_V is not None and "voltage_V" in gg.columns:
         vseg = pd.to_numeric(gg["voltage_V"].iloc[a_step:b_step + 1], errors="coerce").to_numpy()
@@ -273,13 +308,13 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
         if finite.size:
             span = float(np.nanmax(finite) - np.nanmin(finite))
             if span < min_voltage_span_V:
-                return None
+                return None, None
 
     if require_trailing_step and trailing_step_id is not None and "step_int" in gg.columns:
         steps = pd.to_numeric(gg["step_int"], errors="coerce").to_numpy()
         has_trailing_after = np.any((steps == trailing_step_id) & (np.arange(len(steps)) > b_step))
         if not has_trailing_after:
-            return None
+            return None, None
 
     t_end = gg["abs_time"].iloc[b_step]
     t_start = gg["abs_time"].iloc[a_step]
@@ -290,7 +325,7 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
         if finite.size:
             min_v = float(np.min(finite))
 
-    return StepCapacityResult(
+    result = StepCapacityResult(
         capacity_Ah=cap_ah,
         discharge_end_time=t_end,
         index_start=a_step,
@@ -299,3 +334,7 @@ def compute_checkup_point_rpt_by_state(g: pd.DataFrame, *,
         min_voltage_V=min_v,
         step_id=-1,
     )
+    dom_step = None
+    if "step_int" in gg.columns:
+        dom_step = _dominant_step_id(gg["step_int"], a_step, b_step)
+    return result, dom_step

@@ -8,6 +8,7 @@ from .classify import is_checkup_run, configure_from_config
 from .plotting import save_group_plot, save_grouped_checkup_plot
 from .reports import write_report, write_grouped_report
 from .capacity import (
+    compute_checkup_point_step,
     compute_checkup_point_step19,
     compute_checkup_point_step6,
     compute_checkup_point_rpt_by_state,
@@ -116,12 +117,15 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         rpt_min_voltage_span = soh_cfg.get("rpt_min_voltage_span_V", None)
         if rpt_min_voltage_span is not None:
             rpt_min_voltage_span = float(rpt_min_voltage_span)
+        rpt_lock_step = bool(soh_cfg.get("rpt_lock_step_per_cell", True))
+        rpt_select_by_vspan = bool(soh_cfg.get("rpt_select_by_voltage_span", True))
         rpt_min_step = soh_cfg.get("rpt_min_step_required", None)
         if rpt_min_step is not None:
             rpt_min_step = int(rpt_min_step)
         rpt_trailing_step = soh_cfg.get("rpt_trailing_step_id", None)
         if rpt_trailing_step is not None:
             rpt_trailing_step = int(rpt_trailing_step)
+        locked_rpt_step_id: int | None = None
 
         for df_chk, lbl_chk in checkup_list:
             label_lower = lbl_chk.lower()
@@ -138,19 +142,44 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                 )
                 source_type = "CU"
             elif include_rpt and "rpt" in label_lower:
-                res = compute_checkup_point_rpt_by_state(
-                    df_chk,
-                    discharge_state_keywords=rpt_state_keywords,
-                    min_segment_duration_s=rpt_min_segment_s,
-                    min_capacity_Ah=rpt_min_capacity,
-                    min_voltage_span_V=rpt_min_voltage_span,
-                    min_step_required=rpt_min_step,
-                    eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
-                    i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
-                    trailing_step_id=rpt_trailing_step,
-                    require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
-                )
-                method = "state-based"
+                method = None
+                if rpt_lock_step and locked_rpt_step_id is not None and "step_int" in df_chk.columns:
+                    res = compute_checkup_point_step(
+                        df_chk,
+                        locked_rpt_step_id,
+                        min_step_required=rpt_min_step,
+                        eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                        i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                        trailing_step_id=rpt_trailing_step,
+                        require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                    )
+                    if res is not None:
+                        method = f"locked step {locked_rpt_step_id}"
+                        print(f"[INFO] RPT SoH using locked step {locked_rpt_step_id} for cell {cell}")
+
+                if res is None:
+                    res, dominant_step_id = compute_checkup_point_rpt_by_state(
+                        df_chk,
+                        discharge_state_keywords=rpt_state_keywords,
+                        min_segment_duration_s=rpt_min_segment_s,
+                        min_capacity_Ah=rpt_min_capacity,
+                        min_voltage_span_V=rpt_min_voltage_span,
+                        min_step_required=rpt_min_step,
+                        eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                        i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                        trailing_step_id=rpt_trailing_step,
+                        require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                        select_by_voltage_span=rpt_select_by_vspan,
+                    )
+                    if res is not None:
+                        method = "state-based"
+                        if rpt_lock_step and dominant_step_id is not None:
+                            locked_rpt_step_id = dominant_step_id
+                            print(
+                                f"[INFO] Locked RPT discharge step for cell {cell} "
+                                f"to step {dominant_step_id} (from state-based selection)"
+                            )
+
                 if res is None:
                     if "step_int" not in df_chk.columns:
                         continue
@@ -163,6 +192,8 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                         require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
                     )
                     method = "step-6 fallback"
+                    if res is not None:
+                        print(f"[WARN] RPT SoH fallback to step 6 for cell {cell}")
                 source_type = "RPT"
             if res is None:
                 continue

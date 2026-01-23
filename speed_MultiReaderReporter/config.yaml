@@ -29,6 +29,8 @@ soh:
   rpt_min_segment_duration_s: 60
   rpt_min_capacity_Ah: 1e-4
   rpt_min_voltage_span_V: null
+  rpt_lock_step_per_cell: true
+  rpt_select_by_voltage_span: true
 
 legend:
   ncol: 4
