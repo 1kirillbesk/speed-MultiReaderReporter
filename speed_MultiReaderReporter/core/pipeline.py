@@ -7,7 +7,11 @@ import pandas as pd
 from .classify import is_checkup_run, configure_from_config
 from .plotting import save_group_plot, save_grouped_checkup_plot
 from .reports import write_report, write_grouped_report
-from .capacity import compute_checkup_point_step19, compute_checkup_point_step6
+from .capacity import (
+    compute_checkup_point_step19,
+    compute_checkup_point_step6,
+    compute_checkup_point_rpt_by_state,
+)
 from .soh import cumulative_throughput_until
 from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
@@ -106,6 +110,12 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         soh_cfg = cfg.get("soh", {})
         export_soh_data = bool(soh_cfg.get("export_data", True))
         include_rpt = bool(soh_cfg.get("include_rpt", True))
+        rpt_state_keywords = soh_cfg.get("rpt_discharge_state_keywords", ["DCH", "DISCH", "DIS", "ENTL"])
+        rpt_min_segment_s = float(soh_cfg.get("rpt_min_segment_duration_s", 60.0))
+        rpt_min_capacity = float(soh_cfg.get("rpt_min_capacity_Ah", 1e-4))
+        rpt_min_voltage_span = soh_cfg.get("rpt_min_voltage_span_V", None)
+        if rpt_min_voltage_span is not None:
+            rpt_min_voltage_span = float(rpt_min_voltage_span)
         rpt_min_step = soh_cfg.get("rpt_min_step_required", None)
         if rpt_min_step is not None:
             rpt_min_step = int(rpt_min_step)
@@ -128,23 +138,41 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                 )
                 source_type = "CU"
             elif include_rpt and "rpt" in label_lower:
-                if "step_int" not in df_chk.columns:
-                    continue
-                res = compute_checkup_point_step6(
+                res = compute_checkup_point_rpt_by_state(
                     df_chk,
+                    discharge_state_keywords=rpt_state_keywords,
+                    min_segment_duration_s=rpt_min_segment_s,
+                    min_capacity_Ah=rpt_min_capacity,
+                    min_voltage_span_V=rpt_min_voltage_span,
                     min_step_required=rpt_min_step,
                     eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
                     i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
                     trailing_step_id=rpt_trailing_step,
                     require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
                 )
+                method = "state-based"
+                if res is None:
+                    if "step_int" not in df_chk.columns:
+                        continue
+                    res = compute_checkup_point_step6(
+                        df_chk,
+                        min_step_required=rpt_min_step,
+                        eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                        i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                        trailing_step_id=rpt_trailing_step,
+                        require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                    )
+                    method = "step-6 fallback"
                 source_type = "RPT"
             if res is None:
                 continue
             x_thru = cumulative_throughput_until(total_list, res.discharge_end_time)
             soh_points.append((x_thru, res.capacity_Ah, lbl_chk, res.discharge_end_time, source_type))
             if source_type == "RPT":
-                print(f"[INFO] Added RPT SoH point for cell {cell}, step 6 discharge capacity = {res.capacity_Ah:.4f} Ah")
+                print(
+                    f"[INFO] Added RPT SoH point ({method}) for cell {cell}, "
+                    f"capacity = {res.capacity_Ah:.4f} Ah @ {res.discharge_end_time}"
+                )
             soh_rows.append({
                 "cell_id": cell,
                 "program_name": lbl_chk,
