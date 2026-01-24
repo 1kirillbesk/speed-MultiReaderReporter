@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from csaps import csaps
 from scipy.signal import find_peaks
+
 import matplotlib.pyplot as plt
 from matplotlib import cm
 import os
@@ -499,27 +500,31 @@ def extract_ITA(df,cell,cfg):
 def window_delta_mean_var(
     df: pd.DataFrame, x_col: str, y_col: str,
     x_lo: float, x_hi: float, baseline_idx=0,
-) -> pd.DataFrame:
+):
     """
     For each row i:
       mask = x_i in [x_lo, x_hi]
       diff = (y_i - y_baseline)[mask]
       store mean(diff), var(diff)
-    Generic: x and y can be any same-length arrays (lists or np arrays).
     """
     mean = []
     var = []
 
-    y0 = np.asarray(df.loc[0, y_col], dtype=float)
+    y0 = np.asarray(df.loc[baseline_idx, y_col], dtype=float)
+    y0 = np.nan_to_num(y0, nan=0.0)
 
     for i in range(len(df)):
-        if i == 0:
+        if i == baseline_idx:
             mean.append(0.0)
             var.append(0.0)
             continue
 
         y_i = np.asarray(df.loc[i, y_col], dtype=float)
         x_i = np.asarray(df.loc[i, x_col], dtype=float)
+
+        # 🔹 replace NaNs with 0
+        y_i = np.nan_to_num(y_i, nan=0.0)
+        x_i = np.nan_to_num(x_i, nan=0.0)
 
         mask = (x_i >= x_lo) & (x_i <= x_hi)
 
@@ -535,6 +540,7 @@ def window_delta_mean_var(
         var.append(float(np.var(diff, ddof=0)))
 
     return mean, var
+
 
 def get_peaks(x, y, distance=None):
     x = np.asarray(x).ravel()

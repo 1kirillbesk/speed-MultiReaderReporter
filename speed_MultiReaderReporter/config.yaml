@@ -37,7 +37,7 @@ legend:
 voltage:
   high: 3.6
   highm: 3.45
-  lowm: 3.25
+  lowm: 3.35
   low: 2
 
 CU_steps:
