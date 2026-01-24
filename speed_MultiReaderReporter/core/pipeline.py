@@ -15,7 +15,8 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('C:/Users/Public/Documents/takedata/Speed/out_lw') / "errors.log"
+log_path = Path('C:/Users/Public/Documents/RL_project/out_lw') / "errors.log"
+#C:/Users/Public/Documents/takedata/Speed/out_lw
 logging.basicConfig(
     filename=str(log_path),
     level=logging.INFO,
@@ -216,8 +217,8 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         try:
             vol_high = volt_lim["high"];
             vol_low = volt_lim["low"]
-            vol_mhigh = volt_lim["high"];
-            vol_mlow = volt_lim["low"]
+            vol_mhigh = volt_lim["highm"];
+            vol_mlow = volt_lim["lowm"]
 
             mean_mid_cha, var_mid_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_mlow,
                                                               x_hi=vol_mhigh)
