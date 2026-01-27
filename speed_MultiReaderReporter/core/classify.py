@@ -24,7 +24,7 @@ def configure_from_config(cfg: dict) -> None:
     global _DURATION_THRESHOLD_MIN, _STEP_MIN_REQUIRED, _REQUIRE_19_AND_22, _SKIP_GLU
 
     # reset to defaults each call so repeated invocations do not accumulate
-    _CHECKUP_KEYWORDS = ("cu", "glu", "rpt")
+    _CHECKUP_KEYWORDS = ("cu", "glu", "rpt","check_up")
     _CYCLING_KEYWORDS = ("cyc",)
     _DURATION_THRESHOLD_MIN = 60
     _STEP_MIN_REQUIRED = 20

@@ -15,7 +15,7 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('C:/Users/Public/Documents/RL_project/out_lw') / "errors.log"
+log_path = Path('C:/Users/rul/SARLFP/hakad/out_hk') / "errors.log"
 #C:/Users/Public/Documents/takedata/Speed/out_lw
 logging.basicConfig(
     filename=str(log_path),
@@ -165,7 +165,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             for df_chk, lbl_chk in checkup_list:
                 try:
                     label_lower = lbl_chk.lower()
-                    if "cu" in label_lower or "rpt" in label_lower:
+                    if "qocv" in label_lower or "rpt" in label_lower:
                         df_chk = df_chk.copy()
                         df_chk["abs_time"] = pd.to_datetime(df_chk["abs_time"], errors="coerce")
                         df_chk = df_chk.dropna(subset=["abs_time"])
@@ -173,10 +173,10 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
                         ocv_features = extract_features(df_chk, cell, cfg)
 
-                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse"].reset_index(drop=True)
-                        pulse_feature = analyze_df_pulse(df_filtered)
+                        #df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse"].reset_index(drop=True)
+                        #pulse_feature = analyze_df_pulse(df_filtered)
 
-                        features = ocv_features | pulse_feature
+                        features = ocv_features #| pulse_feature
                         rows.append(features)
                 except Exception as e:
                     logging.exception(f"[{cell}] feature extraction failed for checkup run '{lbl_chk}': {e}")
@@ -443,42 +443,35 @@ def add_throughput_column(df_summary, rows_through, df_time_col="CU_time",
 
 def parse_experiment_label(label: str):
     """
-    Parse experiment string and extract:
-      - soc_start
-      - soc_end
-      - c_rate_chg
-      - c_rate_dchg
-      - temperature
+    Extract:
+      1) numeric value before first 'C'
+      2) first C-rate (e.g. 0C1 -> 0.1)
+      3) second C-rate (e.g. 1C0 -> 1.0)
+      4) voltage (e.g. 4V0 -> 4.0)
     """
 
     result = {
-        "soc_start": None,
-        "soc_end": None,
-        "c_rate_chg": None,
-        "c_rate_dchg": None,
-        "temp": None,
+        "first_c_number": None,
+        "c_rate_1": None,
+        "c_rate_2": None,
+        "voltage": None,
     }
 
-    # ---------- SOC: _0SOC100_ ----------
-    m_soc = re.search(r"_(\d+)SOC(\d+)_", label)
-    if m_soc:
-        result["soc_start"] = int(m_soc.group(1))
-        result["soc_end"] = int(m_soc.group(2))
+    # ---- number before first C (e.g. 3C) ----
+    m_first = re.search(r"_([0-9]+)C_", label)
+    if m_first:
+        result["first_c_number"] = int(m_first.group(1))
 
-    # ---------- C-rate: _05C1C_ ----------
-    m_c = re.search(r"_(\d+)C(\d+)C_", label)
-    if m_c:
-        def parse_c(val):
-            # "05" -> 0.5, "15" -> 15.0
-            return int(val) / 10 if val.startswith("0") else float(val)
+    # ---- two C-rates before CC (e.g. 0C1_1C0_CC) ----
+    m_c_rates = re.search(r"_([0-9]+)C([0-9]+)_([0-9]+)C([0-9]+)_CC", label)
+    if m_c_rates:
+        result["c_rate_1"] = int(m_c_rates.group(1)) + int(m_c_rates.group(2)) / 10
+        result["c_rate_2"] = int(m_c_rates.group(3)) + int(m_c_rates.group(4)) / 10
 
-        result["c_rate_chg"] = parse_c(m_c.group(1))
-        result["c_rate_dchg"] = parse_c(m_c.group(2))
-
-    # ---------- Final value: last _number ----------
-    m_final = re.search(r"_([0-9]+)$", label)
-    if m_final:
-        result["temp"] = int(m_final.group(1))
+    # ---- voltage (e.g. 4V0) ----
+    m_v = re.search(r"_([0-9]+)V([0-9]+)$", label)
+    if m_v:
+        result["voltage"] = int(m_v.group(1)) + int(m_v.group(2)) / 10
 
     return result
 
