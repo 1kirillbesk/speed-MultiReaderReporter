@@ -376,7 +376,7 @@ def main(dir_path: Path, out_dir: Path):
     x_col = "mean_d_dqdv_m_c"
     y_col = "mean_d_dqdv_h_c"
 
-    K_CLOSEST = 15
+    K_CLOSEST = 25
     K_FARTHEST = 15
 
     ref_sub = df_ref[df_ref["cell_name"].isin(REF_NAMES)][["cell_name", x_col, y_col]].dropna().reset_index(drop=True)

@@ -173,6 +173,26 @@ def weeks_to_reach_soh(traj_weeks: pd.DataFrame, soh_target: float) -> float | N
     return float(np.interp(soh_target, s_sorted, w_sorted))
 
 
+def idx_first_reach_soh(traj: pd.DataFrame, soh_target: float) -> int | None:
+    """
+    Return the FIRST integer index where interpolated SOH reaches <= soh_target.
+    Returns None if never reaches.
+    """
+    if traj is None or traj.empty or "SOH" not in traj.columns:
+        return None
+
+    s = traj["SOH"].to_numpy(dtype=float)
+    ok = ~np.isnan(s)
+    if not np.any(ok):
+        return None
+    s = s[ok]
+
+    hit = np.where(s <= soh_target)[0]
+    if len(hit) == 0:
+        return None
+    return int(hit[0])
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -181,7 +201,7 @@ def main(dir_path: Path, out_dir: Path):
 
     # TWO target SOHs:
     target_soh_features = 0.998   # feature row selection
-    target_soh_plot = 0.985        # interpolation grid for plotting
+    target_soh_plot = 0.985       # interpolation grid for plotting
 
     rows = []
     rows_ref = []
@@ -190,9 +210,12 @@ def main(dir_path: Path, out_dir: Path):
     REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
 
     # CONFIG YOU WANT:
-    K_CLOSEST_FEATURE = 20   # keep 15 closest in feature space -> ORANGE
-    K_SLOWEST_BLACK = 1      # among those 15, mark the slowest-aging in BLACK (set 3/5 if you want multiple)
+    K_CLOSEST_FEATURE = 20   # keep 20 closest in feature space -> ORANGE
+    K_SLOWEST_BLACK = 1      # among those closest, mark slowest-aging in BLACK
     SOH_SLOW_TARGET = 0.96   # "slow" defined by max weeks to reach this SOH
+
+    # NEW: Gaussian distribution target (index where SOH reaches this)
+    SOH_DIST_TARGET = 0.97
 
     # SPEED: read only needed columns
     needed_cols = (
@@ -226,7 +249,7 @@ def main(dir_path: Path, out_dir: Path):
     traj_by_cell_weeks: dict[str, pd.DataFrame] = {}
     traj_by_cell_thr: dict[str, pd.DataFrame] = {}
 
-    # For Gaussian distributions
+    # For Gaussian distributions (optional bookkeeping you had)
     SOH_GAUSS_TARGET = 0.965
     idx_at_soh_gauss_exp: dict[str, int] = {}
     soh_series_exp: dict[str, np.ndarray] = {}
@@ -451,8 +474,6 @@ def main(dir_path: Path, out_dir: Path):
 
     closest_cellnames: list[str] = []
     farthest_cellnames: list[str] = []
-
-    # NEW: slowest among closest
     slowest_black_cellnames: list[str] = []
 
     if ref_sub.empty:
@@ -463,8 +484,30 @@ def main(dir_path: Path, out_dir: Path):
         ref_xyz = ref_sub[[x_col, y_col, z_col]].to_numpy(dtype=float)
         exp_xyz = exp_sub[[x_col, y_col, z_col]].to_numpy(dtype=float)
 
-        # distance to NEAREST ref (min over refs)
-        dists = np.linalg.norm(exp_xyz[:, None, :] - ref_xyz[None, :, :], axis=2)
+        # -------------------------------------------------
+        # UNIFIED normalization (refs + exp together)
+        # -------------------------------------------------
+        all_xyz = np.vstack([ref_xyz, exp_xyz])
+
+        mu = all_xyz.mean(axis=0)
+        sd = all_xyz.std(axis=0, ddof=1)
+        sd = np.maximum(sd, 1e-12)  # numerical safety
+
+        ref_n = (ref_xyz - mu) / sd
+        exp_n = (exp_xyz - mu) / sd
+
+        # -------------------------------------------------
+        # Equal weighting (explicit but trivial)
+        # -------------------------------------------------
+        # (kept explicit so future weighting is easy)
+        weights = np.array([1.0, 1.0, 1.0], dtype=float)
+        ref_n *= weights
+        exp_n *= weights
+
+        # -------------------------------------------------
+        # Distance to NEAREST reference
+        # -------------------------------------------------
+        dists = np.linalg.norm(exp_n[:, None, :] - ref_n[None, :, :], axis=2)
         dist = np.min(dists, axis=1)
 
         k1 = min(K_CLOSEST_FEATURE, len(exp_sub))
@@ -705,6 +748,72 @@ def main(dir_path: Path, out_dir: Path):
             )
 
         added_black_label = True
+
+    # -----------------------------
+    # NEW: Gaussian distributions of INDEX where SOH first reaches 0.96
+    # Groups:
+    #   ORANGE = closest_cellnames
+    #   GREEN  = farthest_cellnames
+    #   BLUE   = all other exp cells (excluding orange & green)
+    # -----------------------------
+    exp_all = df_exp["cell_name"].dropna().unique().tolist()
+    orange_cells = list(dict.fromkeys(closest_cellnames))
+    green_cells = list(dict.fromkeys(farthest_cellnames))
+    orange_set = set(orange_cells)
+    green_set = set(green_cells)
+    blue_cells = [cn for cn in exp_all if (cn not in orange_set) and (cn not in green_set)]
+
+    idx_blue, idx_orange, idx_green = [], [], []
+
+    for cn in blue_cells:
+        idx = idx_first_reach_soh(traj_by_cell_weeks.get(cn), SOH_DIST_TARGET)
+        if idx is not None:
+            idx_blue.append(idx)
+
+    for cn in orange_cells:
+        idx = idx_first_reach_soh(traj_by_cell_weeks.get(cn), SOH_DIST_TARGET)
+        if idx is not None:
+            idx_orange.append(idx)
+
+    for cn in green_cells:
+        idx = idx_first_reach_soh(traj_by_cell_weeks.get(cn), SOH_DIST_TARGET)
+        if idx is not None:
+            idx_green.append(idx)
+
+    print(f"\nIndex where interpolated SOH first reaches <= {SOH_DIST_TARGET}:")
+    print(f"  BLUE   (other exp): n={len(idx_blue)}   mean={np.mean(idx_blue) if idx_blue else np.nan:.2f}")
+    print(f"  ORANGE (closest)  : n={len(idx_orange)} mean={np.mean(idx_orange) if idx_orange else np.nan:.2f}")
+    print(f"  GREEN  (farthest) : n={len(idx_green)}  mean={np.mean(idx_green) if idx_green else np.nan:.2f}")
+
+    fig_g, ax_g = plt.subplots(figsize=(9, 5))
+
+    def plot_gauss(ax, data, label, color, bins=25):
+        if len(data) < 2:
+            return  # not enough points to estimate sigma
+        data = np.asarray(data, dtype=float)
+        mu = float(np.mean(data))
+        sigma = float(np.std(data, ddof=1))
+        sigma = max(sigma, 1e-6)
+
+        ax.hist(data, bins=bins, density=True, alpha=0.25, color=color)
+
+        x_min = float(np.min(data) - 3.0 * sigma)
+        x_max = float(np.max(data) + 3.0 * sigma)
+        x = np.linspace(x_min, x_max, 400)
+        y = gaussian_pdf(x, mu, sigma)
+        ax.plot(x, y, color=color, linewidth=2.0, label=f"{label}: μ={mu:.1f}, σ={sigma:.1f}, n={len(data)}")
+
+    plot_gauss(ax_g, idx_blue,   "BLUE (other exp)", "blue")
+    plot_gauss(ax_g, idx_orange, "ORANGE (closest)", "orange")
+    plot_gauss(ax_g, idx_green,  "GREEN (farthest)", "green")
+
+    ax_g.set_ylim(0, 1.5)
+    ax_g.set_xlabel(f"index where interpolated SOH first <= {SOH_DIST_TARGET}")
+    ax_g.set_ylabel("density")
+    ax_g.set_title(f"Gaussian distributions of reach-index at SOH={SOH_DIST_TARGET} (interpolated SOH)")
+    ax_g.grid(True, alpha=0.3)
+    ax_g.legend(loc="best")
+    fig_g.tight_layout()
 
     # -----------------------------
     # Finalize plots
