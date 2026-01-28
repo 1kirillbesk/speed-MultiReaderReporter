@@ -56,13 +56,59 @@ def is_checkup_run(program_name: str, df: pd.DataFrame, cu_keywords) -> bool:
     _LOG.debug("defaulting to cycling")
     return False
 
-def split_total_list(cell, total_list,cfg):
+def split_total_list(cell, total_list, cfg):
+    """
+    total_list: list of tuples -> (df, label)
+
+    Pre-processing logic (runs before the main while-loop):
+      - ONLY if "homocomp" in label (case-insensitive)
+      - and df contains (step_int == 16) AND (state contains "SAVE")
+      - then replace that single (df,label) with TWO elements:
+            1) df where step_int > 16   (FIRST)
+            2) df where step_int <= 16  (AFTER)
+        (label stays identical for both)
+    """
     checkup_list, cycling_list = [], []
 
     # keywords
-    rpt_keywords = tuple(cfg["classification"]["rpt_keywords"])   # checkups defined ONLY by these in pairing mode
-    cu_keyword = cfg["classification"]["cu_keyword"]         # normal mode checkup marker
+    rpt_keywords = tuple(cfg["classification"]["rpt_keywords"])
+    cu_keyword = cfg["classification"]["cu_keyword"]
 
+    # ------------------------------------------------------------------
+    # NEW: preprocess total_list (split homocomp items if condition holds)
+    # ------------------------------------------------------------------
+    processed_total_list = []
+    for df, label in total_list:
+        label_lower = (label or "").lower()
+
+        # ONLY apply logic to labels containing "homocomp"
+        if "homocomp" in label_lower:
+            try:
+                if "step_int" in df.columns and "state" in df.columns:
+                    cond_step16 = (df["step_int"] == 16).any()
+                    cond_save = df["state"].astype(str).str.contains("SAVE", na=False).any()
+
+                    if cond_step16 and cond_save:
+                        # SPLIT LOGIC (order matters!)
+                        df_high = df[df["step_int"] > 16].copy()
+                        df_low  = df[df["step_int"] <= 16].copy()
+
+                        # append HIGH first, then LOW
+                        if not df_high.empty:
+                            processed_total_list.append((df_high, label))
+                        if not df_low.empty:
+                            processed_total_list.append((df_low, label))
+
+                        continue  # done with this element
+            except Exception as e:
+                logging.exception(f"[{cell}] homocomp split failed for '{label}': {e}")
+                processed_total_list.append((df, label))
+                continue
+
+        # default: keep as-is
+        processed_total_list.append((df, label))
+
+    total_list = processed_total_list
     n = len(total_list)
 
     # --- First pass: estimate how many "rpt" checkups exist (for mode decision) ---
@@ -70,7 +116,6 @@ def split_total_list(cell, total_list,cfg):
         1 for _, label in total_list
         if any(k in (label or "").lower() for k in rpt_keywords)
     )
-
     pairing_mode = rpt_count < (n / 2)
 
     i = 0
@@ -84,8 +129,9 @@ def split_total_list(cell, total_list,cfg):
         if pairing_mode:
             if any(k in label_lower for k in rpt_keywords):
                 if i == 0:
-                    # No previous item exists
-                    logging.warning(f"[{cell}] '{label}' is SAM_rpt but has no previous item; putting into checkup as-is.")
+                    logging.warning(
+                        f"[{cell}] '{label}' is SAM_rpt but has no previous item; putting into checkup as-is."
+                    )
                     checkup_list.append((df, label))
                     i += 1
                     continue
@@ -97,8 +143,9 @@ def split_total_list(cell, total_list,cfg):
                     combined_label = f"{prev_label}__PLUS__{label}"
                     checkup_list.append((combined_df, combined_label))
                 except Exception as e:
-                    logging.exception(f"[{cell}] concat failed for prev '{prev_label}' + rpt '{label}': {e}")
-                    # fallback: keep separate
+                    logging.exception(
+                        f"[{cell}] concat failed for prev '{prev_label}' + rpt '{label}': {e}"
+                    )
                     cycling_list.append((prev_df, prev_label))
                     checkup_list.append((df, label))
 
@@ -108,14 +155,12 @@ def split_total_list(cell, total_list,cfg):
                 i += 1
                 continue
 
-            # Not an lw_rpt: by default cycling (for now)
             cycling_list.append((df, label))
             i += 1
             continue
 
         # -------------------------
         # MODE B: Normal logic
-        # If label has lw_cu => checkup, else cycling
         # -------------------------
         if cu_keyword in label_lower:
             if (df["step_int"] == 34).any():
@@ -125,28 +170,24 @@ def split_total_list(cell, total_list,cfg):
 
         i += 1
 
-    # --- Cleanup for pairing mode to avoid double-counting prev items ---
-    # The pop logic above handles the common case where i-1 was appended just before.
-    # This additional pass ensures correctness if your loop changes later:
+    # --- Cleanup for pairing mode ---
     if pairing_mode:
-        # Any item that is immediately before an lw_rpt should not remain in cycling
         indices_before_rpt = set()
         for idx in range(1, n):
             lbl = (total_list[idx][1] or "").lower()
             if any(k in lbl for k in rpt_keywords):
                 indices_before_rpt.add(idx - 1)
 
-        # rebuild cycling_list based on original order + indices to exclude
         cycling_list = [
             (df, lbl)
             for idx, (df, lbl) in enumerate(total_list)
             if idx not in indices_before_rpt
-            and not any(k in (lbl or "").lower() for k in rpt_keywords)  # lw_rpt itself is checkup
-        ] + [
-            x for x in cycling_list
-            if False  # placeholder; we rebuilt above to be safe
+            and not any(k in (lbl or "").lower() for k in rpt_keywords)
         ]
-        # NOTE: We rebuilt cycling_list from total_list in a deterministic way.
-        # checkup_list remains as created (with concatenated segments).
 
     return checkup_list, cycling_list
+
+
+# import matplotlib.pyplot as plt
+# plt.plot(processed_total_list[0][0]['voltage_V'])
+# plt.show()
