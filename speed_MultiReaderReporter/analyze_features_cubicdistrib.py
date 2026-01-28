@@ -6,7 +6,8 @@ import sys
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-from scipy.interpolate import CubicSpline  # <-- switched from PCHIP to CubicSpline
+from scipy.interpolate import CubicSpline
+
 
 # --- relative paths ---
 here = Path(__file__).resolve().parent
@@ -14,6 +15,12 @@ sys.path.append(str(here))
 sys.path.append(str(here / "core"))
 sys.path.append(str(here / "loaders"))
 sys.path.append(str(here / "utils"))
+
+
+def gaussian_pdf(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
+    """Gaussian PDF; sigma is clamped to avoid division by zero."""
+    sigma = float(max(sigma, 1e-12))
+    return (1.0 / (sigma * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
 
 # -----------------------------
@@ -71,7 +78,7 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     # find reference location where SOH reaches target_soh (SOH decreases => reverse)
     interpolated_ref = np.interp(target_soh, target_data[::-1], reference[::-1])
 
-    # 6 points up to target, then continue with same spacing
+    # 15 points up to target, then continue with same spacing
     new_ref_points_cut = np.linspace(0.0, float(interpolated_ref), 15)
     spacing = float(np.mean(np.diff(new_ref_points_cut))) if len(new_ref_points_cut) > 1 else 0.0
     if spacing <= 0:
@@ -124,6 +131,45 @@ def exp_row_from_first_line(df: pd.DataFrame, exp_conds: list[str]) -> pd.Series
     return df.loc[0, exp_conds]
 
 
+def weeks_to_reach_soh(traj_weeks: pd.DataFrame, soh_target: float) -> float | None:
+    """
+    Return interpolated weeks when SOH reaches soh_target.
+    Returns None if curve never reaches soh_target or data invalid.
+    """
+    if traj_weeks is None or traj_weeks.empty:
+        return None
+    if "weeks" not in traj_weeks.columns or "SOH" not in traj_weeks.columns:
+        return None
+
+    w = traj_weeks["weeks"].to_numpy(dtype=float)
+    s = traj_weeks["SOH"].to_numpy(dtype=float)
+
+    ok = ~np.isnan(w) & ~np.isnan(s)
+    w = w[ok]
+    s = s[ok]
+    if len(w) < 3:
+        return None
+
+    # If it never reaches the target (SOH stays above target)
+    if np.nanmin(s) > soh_target:
+        return None
+
+    # Interpolate weeks at target SOH:
+    # sort by SOH to ensure monotonic xp for np.interp (robust to slight wiggles)
+    idx = np.argsort(s)  # SOH ascending
+    s_sorted = s[idx]
+    w_sorted = w[idx]
+
+    # remove duplicate SOH values
+    keep = ~pd.Series(s_sorted).duplicated(keep="first")
+    s_sorted = s_sorted[keep.values]
+    w_sorted = w_sorted[keep.values]
+    if len(s_sorted) < 2:
+        return None
+
+    return float(np.interp(soh_target, s_sorted, w_sorted))
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -131,22 +177,31 @@ def main(dir_path: Path, out_dir: Path):
     exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
 
     # TWO target SOHs:
-    target_soh_features = 0.995   # used to pick the feature row for comparisons
-    target_soh_plot = 0.985    # used to build the interpolated SOH curve grid (trajectories)
+    target_soh_features = 0.998   # feature row selection
+    target_soh_plot = 0.98        # interpolation grid for plotting
 
     rows = []
     rows_ref = []
 
-    # The 3 reference cell names you want to use for "closest/farthest"
+    # Reference cell names
     REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
+
+    # CONFIG YOU WANT:
+    K_CLOSEST_FEATURE = 15   # keep 15 closest in feature space -> ORANGE
+    K_SLOWEST_BLACK = 1      # among those 15, mark the slowest-aging in BLACK (set 3/5 if you want multiple)
+    SOH_SLOW_TARGET = 0.96   # "slow" defined by max weeks to reach this SOH
 
     # SPEED: read only needed columns
     needed_cols = (
         ["CU_time"]
         + exp_conds
         + ["cap_ocv_dis"]
-        + ["mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_m_d", "var_d_dqdv_m_d", "mean_d_dqdv_h_c","mean_d_dqdv_l_c"]
-        + ["throughput_cum","mean_d_dqdv_h_d","mean_d_dqdv_l_d"]
+        + [
+            "mean_d_dqdv_m_c", "var_d_dqdv_m_c",
+            "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
+            "mean_d_dqdv_h_c", "mean_d_dqdv_l_c",
+        ]
+        + ["throughput_cum", "mean_d_dqdv_h_d", "mean_d_dqdv_l_d"]
     )
 
     # ---- Plot 1: index-based ----
@@ -159,14 +214,19 @@ def main(dir_path: Path, out_dir: Path):
     added_blue_label_w = False
     added_red_label_w = False
 
-    # ---- Plot 3: throughput_cum on x-axis (NEW) ----
+    # ---- Plot 3: throughput_cum on x-axis ----
     fig_t, ax_t = plt.subplots(figsize=(9, 5))
     added_blue_label_t = False
     added_red_label_t = False
 
-    # Keep interpolated trajectories (built with target_soh_plot)
+    # Keep interpolated trajectories
     traj_by_cell_weeks: dict[str, pd.DataFrame] = {}
     traj_by_cell_thr: dict[str, pd.DataFrame] = {}
+
+    # For Gaussian distributions
+    SOH_GAUSS_TARGET = 0.965
+    idx_at_soh_gauss_exp: dict[str, int] = {}
+    soh_series_exp: dict[str, np.ndarray] = {}
 
     for csv_file in dir_path.glob("*.csv"):
         cell_name = csv_file.stem
@@ -206,7 +266,9 @@ def main(dir_path: Path, out_dir: Path):
             "mean_d_dqdv_m_d",
             "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c",
-            "mean_d_dqdv_l_c","mean_d_dqdv_h_d","mean_d_dqdv_l_d",
+            "mean_d_dqdv_l_c",
+            "mean_d_dqdv_h_d",
+            "mean_d_dqdv_l_d",
         ]
         missing = [c for c in interp_cols_weeks if c not in df.columns]
         if missing:
@@ -215,18 +277,21 @@ def main(dir_path: Path, out_dir: Path):
 
         df_filter_weeks = df[interp_cols_weeks].copy()
 
-        # --- interpolated curve for plotting vs weeks (uses target_soh_plot) ---
         interpolated_plot_weeks = load_and_interpolate(df_filter_weeks, target_soh_plot, interpolation_typ="weeks")
         if interpolated_plot_weeks is None or interpolated_plot_weeks.empty:
             print(f"[WARN] {cell_name}: interpolation (weeks) failed, skipping.")
             continue
-        if "SOH" not in interpolated_plot_weeks.columns or "weeks" not in interpolated_plot_weeks.columns:
-            print(f"[WARN] {cell_name}: interpolated_df (weeks) missing SOH/weeks, skipping.")
-            continue
 
         traj_by_cell_weeks[cell_name] = interpolated_plot_weeks[["weeks", "SOH"]].copy()
 
-        # --- interpolated curve for plotting vs throughput_cum (NEW) ---
+        # gaussian bookkeeping for exp cells
+        if not exp_row.isna().any():
+            soh_arr = interpolated_plot_weeks["SOH"].to_numpy(dtype=float)
+            idx_g = int(np.argmin(np.abs(soh_arr - SOH_GAUSS_TARGET)))
+            idx_at_soh_gauss_exp[cell_name] = idx_g
+            soh_series_exp[cell_name] = soh_arr
+
+        # throughput interpolation
         interp_cols_thr = [
             "throughput_cum",
             "cap_ocv_dis",
@@ -235,11 +300,12 @@ def main(dir_path: Path, out_dir: Path):
             "mean_d_dqdv_m_d",
             "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c",
-            "mean_d_dqdv_l_c","mean_d_dqdv_h_d","mean_d_dqdv_l_d",
+            "mean_d_dqdv_l_c",
+            "mean_d_dqdv_h_d",
+            "mean_d_dqdv_l_d",
         ]
         missing_thr = [c for c in interp_cols_thr if c not in df.columns]
         if missing_thr:
-            print(f"[WARN] {cell_name}: missing {missing_thr}, skipping throughput plot.")
             interpolated_plot_thr = None
         else:
             df_filter_thr = df[interp_cols_thr].copy()
@@ -249,7 +315,7 @@ def main(dir_path: Path, out_dir: Path):
             if "SOH" in interpolated_plot_thr.columns and "throughput_cum" in interpolated_plot_thr.columns:
                 traj_by_cell_thr[cell_name] = interpolated_plot_thr[["throughput_cum", "SOH"]].copy()
 
-        # ---- Plot SOH for this cell (index-only) ----
+        # ---- Base plotting of "all curves" ----
         is_ref_case = exp_row.isna().any() and ("LW_reference" in cell_name)
 
         if is_ref_case:
@@ -324,7 +390,6 @@ def main(dir_path: Path, out_dir: Path):
 
         print(f"{cell_name}: success")
 
-    # Finalize dataframes (built at target_soh_features)
     df_ref = pd.DataFrame(rows_ref).reset_index(drop=True)
     df_exp = pd.DataFrame(rows).reset_index(drop=True)
 
@@ -370,14 +435,12 @@ def main(dir_path: Path, out_dir: Path):
         added_ref_label = True
 
     # -----------------------------
-    # Closest/farthest selection based on TWO features at target_soh_features
-    # BUT: "closest to MEAN of references"
+    # Closest/farthest in feature space (distance to NE demonstrate uses nearest ref)
     # -----------------------------
     x_col = "mean_d_dqdv_m_c"
     y_col = "mean_d_dqdv_h_c"
 
-    K_CLOSEST = 15
-    K_FARTHEST = 15
+    K_FARTHEST = 20
 
     ref_sub = df_ref[df_ref["cell_name"].isin(REF_NAMES)][["cell_name", x_col, y_col]].dropna().reset_index(drop=True)
     exp_sub = df_exp[["cell_name", x_col, y_col]].dropna().reset_index(drop=True)
@@ -385,18 +448,21 @@ def main(dir_path: Path, out_dir: Path):
     closest_cellnames: list[str] = []
     farthest_cellnames: list[str] = []
 
+    # NEW: slowest among closest
+    slowest_black_cellnames: list[str] = []
+
     if ref_sub.empty:
         print(f"[WARN] None of REF_NAMES found in df_ref: {REF_NAMES}")
     elif exp_sub.empty:
         print("[WARN] df_exp has no valid rows for the selected feature columns.")
     else:
+        ref_xy = ref_sub[[x_col, y_col]].to_numpy(dtype=float)
         exp_xy = exp_sub[[x_col, y_col]].to_numpy(dtype=float)
-        ref_mean = ref_sub[[x_col, y_col]].mean().to_numpy(dtype=float)  # (2,)
 
-        # distance to mean reference (Manhattan)
-        dist = np.abs(exp_xy - ref_mean).sum(axis=1)
+        dists = np.linalg.norm(exp_xy[:, None, :] - ref_xy[None, :, :], axis=2)
+        dist = np.min(dists, axis=1)
 
-        k1 = min(K_CLOSEST, len(exp_sub))
+        k1 = min(K_CLOSEST_FEATURE, len(exp_sub))
         closest_idx = np.argsort(dist)[:k1]
         closest_cellnames = exp_sub.loc[closest_idx, "cell_name"].tolist()
 
@@ -404,84 +470,105 @@ def main(dir_path: Path, out_dir: Path):
         farthest_idx = np.argsort(dist)[-k2:]
         farthest_cellnames = exp_sub.loc[farthest_idx, "cell_name"].tolist()
 
-        print(f"\nClosest {len(closest_cellnames)} exp cells to MEAN(refs) at SOH={target_soh_features}:")
+        print(f"\nClosest {len(closest_cellnames)} exp cells (orange) to NEAREST(ref) at SOH={target_soh_features}:")
         for cn in closest_cellnames:
             print(" -", cn)
 
-        print(f"\nFarthest {len(farthest_cellnames)} exp cells from MEAN(refs) at SOH={target_soh_features}:")
-        for cn in farthest_cellnames:
-            print(" -", cn)
+        # -----------------------------
+        # NEW: pick slowest-aging among the closest (weeks to reach SOH_SLOW_TARGET)
+        # -----------------------------
+        scores: list[tuple[str, float]] = []
+        for cn in closest_cellnames:
+            traj_w = traj_by_cell_weeks.get(cn)
+            w_at = weeks_to_reach_soh(traj_w, SOH_SLOW_TARGET)
+            if w_at is None:
+                continue
+            scores.append((cn, float(w_at)))
 
-        # 2D scatter in its own figure
+        if len(scores) == 0:
+            print(f"\n[WARN] None of the closest cells reached SOH={SOH_SLOW_TARGET}. No black highlight.")
+        else:
+            # sort by weeks descending -> slowest = highest weeks
+            scores_sorted = sorted(scores, key=lambda t: t[1], reverse=True)
+            n_black = min(K_SLOWEST_BLACK, len(scores_sorted))
+            slowest_black_cellnames = [cn for cn, _ in scores_sorted[:n_black]]
+
+            print(f"\nSlowest-aging among closest {len(closest_cellnames)} "
+                  f"(max weeks to reach SOH={SOH_SLOW_TARGET}):")
+            for cn, w_at in scores_sorted[:n_black]:
+                print(f" - {cn}: ~{w_at:.2f} weeks")
+
+        # 2D scatter figure (optional)
+        ref_mean = ref_sub[[x_col, y_col]].mean().to_numpy(dtype=float)
         fig_sc, ax_sc = plt.subplots(figsize=(7, 6))
-        # 2) farthest / closest on top of background
+
         ax_sc.scatter(
             exp_sub.loc[farthest_idx, x_col],
             exp_sub.loc[farthest_idx, y_col],
-            s=90,
-            alpha=0.95,
-            color="green",
-            edgecolors="k",
-            linewidths=0.6,
-            label=f"farthest {k2} from mean(ref)",
+            s=90, alpha=0.95, color="green",
+            edgecolors="k", linewidths=0.6,
+            label=f"farthest {k2}",
             zorder=2,
         )
 
         ax_sc.scatter(
             exp_sub.loc[closest_idx, x_col],
             exp_sub.loc[closest_idx, y_col],
-            s=90,
-            alpha=0.95,
-            color="orange",
-            edgecolors="k",
-            linewidths=0.6,
-            label=f"closest {k1} to mean(ref)",
+            s=90, alpha=0.95, color="orange",
+            edgecolors="k", linewidths=0.6,
+            label=f"closest {k1}",
             zorder=3,
         )
 
-        # 3) mean(refs) on top
+        # highlight slowest black(s) on scatter
+        if slowest_black_cellnames:
+            row_black = exp_sub[exp_sub["cell_name"].isin(slowest_black_cellnames)]
+            if not row_black.empty:
+                ax_sc.scatter(
+                    row_black[x_col],
+                    row_black[y_col],
+                    s=180,
+                    color="black",
+                    marker="*",
+                    edgecolors="k",
+                    linewidths=0.8,
+                    label=f"slowest among closest (SOH={SOH_SLOW_TARGET})",
+                    zorder=6,
+                )
+
         ax_sc.scatter(
             [ref_mean[0]], [ref_mean[1]],
-            s=150,
-            color="black",
-            marker="X",
-            label="mean(refs)",
-            zorder=4,
+            s=150, color="black", marker="X",
+            label="mean(refs)", zorder=4
         )
 
-        # 4) refs LAST so they are always visible
         ax_sc.scatter(
             ref_sub[x_col], ref_sub[y_col],
-            s=90,
-            alpha=1.0,
-            color="red",
-            edgecolors="k",
-            linewidths=0.8,
-            label="refs (13..15)",
-            zorder=5,
+            s=90, alpha=1.0, color="red",
+            edgecolors="k", linewidths=0.8,
+            label="refs", zorder=5,
         )
-        # 1) background: all experiments first
+
         ax_sc.scatter(
             exp_sub[x_col], exp_sub[y_col],
             s=30, alpha=0.9, color="blue",
-            label="exp (all)",
-            zorder=1,
+            label="exp (all)", zorder=1,
         )
 
         ax_sc.set_xlabel(x_col)
         ax_sc.set_ylabel(y_col)
-        ax_sc.set_title(f"2D feature space at SOH={target_soh_features}: distance to mean(ref)")
+        ax_sc.set_title(f"2D feature space at SOH={target_soh_features}: distance to nearest(ref)")
         ax_sc.grid(True, alpha=0.25)
         ax_sc.legend()
         fig_sc.tight_layout()
 
     # -----------------------------
     # Overlay trajectories: closest = orange, farthest = green
-    # on ALL plots
     # -----------------------------
     added_orange_label = False
     added_orange_label_w = False
     added_orange_label_t = False
+
     for cn in closest_cellnames:
         traj_w = traj_by_cell_weeks.get(cn)
         if traj_w is None:
@@ -524,6 +611,7 @@ def main(dir_path: Path, out_dir: Path):
     added_green_label = False
     added_green_label_w = False
     added_green_label_t = False
+
     for cn in farthest_cellnames:
         traj_w = traj_by_cell_weeks.get(cn)
         if traj_w is None:
@@ -564,9 +652,49 @@ def main(dir_path: Path, out_dir: Path):
             added_green_label_t = True
 
     # -----------------------------
+    # NEW: Overlay slowest among closest in BLACK on all 3 plots
+    # -----------------------------
+    added_black_label = False
+    for cn in slowest_black_cellnames:
+        traj_w_black = traj_by_cell_weeks.get(cn)
+        if traj_w_black is None:
+            continue
+
+        ax.plot(
+            traj_w_black["SOH"],
+            color="black",
+            alpha=1.0,
+            linewidth=2.4,
+            label=f"slowest among closest (black)" if not added_black_label else None,
+            zorder=10,
+        )
+        ax_w.plot(
+            traj_w_black["weeks"],
+            traj_w_black["SOH"],
+            color="black",
+            alpha=1.0,
+            linewidth=2.4,
+            label=f"slowest among closest (black)" if not added_black_label else None,
+            zorder=10,
+        )
+
+        traj_t_black = traj_by_cell_thr.get(cn)
+        if traj_t_black is not None:
+            ax_t.plot(
+                traj_t_black["throughput_cum"],
+                traj_t_black["SOH"],
+                color="black",
+                alpha=1.0,
+                linewidth=2.4,
+                label=f"slowest among closest (black)" if not added_black_label else None,
+                zorder=10,
+            )
+
+        added_black_label = True
+
+    # -----------------------------
     # Finalize plots
     # -----------------------------
-    # Plot 1 (index-based)
     ax.set_xlabel("index")
     ax.set_ylabel("SOH")
     ax.set_title(
@@ -577,7 +705,6 @@ def main(dir_path: Path, out_dir: Path):
     ax.legend(loc="best")
     fig.tight_layout()
 
-    # Plot 2 (weeks-based)
     ax_w.set_xlabel("weeks")
     ax_w.set_ylabel("SOH")
     ax_w.set_title(
@@ -588,7 +715,6 @@ def main(dir_path: Path, out_dir: Path):
     ax_w.legend(loc="best")
     fig_w.tight_layout()
 
-    # Plot 3 (throughput-based)
     ax_t.set_xlabel("throughput_cum")
     ax_t.set_ylabel("SOH")
     ax_t.set_title(
@@ -599,9 +725,7 @@ def main(dir_path: Path, out_dir: Path):
     ax_t.legend(loc="best")
     fig_t.tight_layout()
 
-    # Show ALL figures once
     plt.show()
-
     return df_exp, df_ref
 
 

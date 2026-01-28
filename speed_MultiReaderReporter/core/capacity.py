@@ -324,14 +324,14 @@ def extract_features(df,cell,cfg):
     features = {}
     # dt = df["relative_time_s"].diff()
     # CU_num = [17, 2, 6, 9]
-    if df["procedure"].str.contains("lw_cu", case=False, na=False).any():
+    if df["procedure"].str.contains("sam_cu", case=False, na=False).any():
         choice = 1
-        rpt_mask = (df["procedure"].str.contains("lw_cu", case=False, na=False))
-        rpt_cyc_mask = (df["procedure"].str.contains("lw_cu", case=False, na=False))
+        rpt_mask = (df["procedure"].str.contains("sam_cu", case=False, na=False))
+        rpt_cyc_mask = (df["procedure"].str.contains("sam_cu", case=False, na=False))
     else:
         choice = 0
         rpt_mask = (df["procedure"].str.contains("rpt", case=False, na=False))
-        rpt_cyc_mask = (df["procedure"].str.contains("LWcp", case=False, na=False))
+        rpt_cyc_mask = (df["procedure"].str.contains("homocomp_sam", case=False, na=False))
 
 
     ocv_cha_step = cfg['CU_steps']['ocv_cha'][choice]; ocv_dis_step = cfg['CU_steps']['ocv_dis'][choice]

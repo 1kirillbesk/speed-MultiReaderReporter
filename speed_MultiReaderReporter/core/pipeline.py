@@ -15,7 +15,7 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('C:/Users/Public/Documents/RL_project/out_lw') / "errors.log"
+log_path = Path('C:/Users/Public/Documents/RL_project/out_inhomo') / "errors.log"
 #C:/Users/Public/Documents/takedata/Speed/out_lw
 logging.basicConfig(
     filename=str(log_path),
@@ -173,7 +173,12 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
                         ocv_features = extract_features(df_chk, cell, cfg)
 
-                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse"].reset_index(drop=True)
+                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse_SAM"].reset_index(drop=True)
+                        # df_filtered = (
+                        #     df_chk
+                        #     .loc[df_chk.index[df_chk["step_int"] == 26].max() + 1:]
+                        #     .query("0 <= step_int <= 15")
+                        # )
                         pulse_feature = analyze_df_pulse(df_filtered)
 
                         features = ocv_features | pulse_feature
@@ -443,12 +448,13 @@ def add_throughput_column(df_summary, rows_through, df_time_col="CU_time",
 
 def parse_experiment_label(label: str):
     """
-    Parse experiment string and extract:
-      - soc_start
-      - soc_end
-      - c_rate_chg
-      - c_rate_dchg
-      - temperature
+    New format supports:
+      ..._<x>c<y>_<socStart>soc<socEnd>_dyn   (dyn optional)
+
+    Extracts:
+      - soc_start, soc_end
+      - c_rate_chg (x), c_rate_dchg (y)   [numbers around 'c']
+      - dyn (bool)
     """
 
     result = {
@@ -456,29 +462,30 @@ def parse_experiment_label(label: str):
         "soc_end": None,
         "c_rate_chg": None,
         "c_rate_dchg": None,
-        "temp": None,
+        "dyn": False,
     }
 
-    # ---------- SOC: _0SOC100_ ----------
-    m_soc = re.search(r"_(\d+)SOC(\d+)_", label)
+    lab = label.lower()
+
+    # ---------- dyn flag ----------
+    result["dyn"] = bool(re.search(r"(^|_)dyn($|_)", lab))
+
+    # ---------- SOC: _20soc80_ ----------
+    m_soc = re.search(r"_(\d+)soc(\d+)_", lab)
     if m_soc:
         result["soc_start"] = int(m_soc.group(1))
         result["soc_end"] = int(m_soc.group(2))
 
-    # ---------- C-rate: _05C1C_ ----------
-    m_c = re.search(r"_(\d+)C(\d+)C_", label)
+    # ---------- C-rate: _xcy_  e.g. _05c1_ or _0c25_ ----------
+    m_c = re.search(r"_(\d+)c(\d+)_", lab)
     if m_c:
-        def parse_c(val):
+        def parse_c(val: str):
+            # minimal change: keep your old rule
             # "05" -> 0.5, "15" -> 15.0
-            return int(val) / 10 if val.startswith("0") else float(val)
+            return int(val) / 10 if val.startswith("0") and len(val) > 1 else float(val)
 
         result["c_rate_chg"] = parse_c(m_c.group(1))
         result["c_rate_dchg"] = parse_c(m_c.group(2))
-
-    # ---------- Final value: last _number ----------
-    m_final = re.search(r"_([0-9]+)$", label)
-    if m_final:
-        result["temp"] = int(m_final.group(1))
 
     return result
 

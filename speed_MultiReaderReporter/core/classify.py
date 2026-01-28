@@ -85,7 +85,7 @@ def split_total_list(cell, total_list,cfg):
             if any(k in label_lower for k in rpt_keywords):
                 if i == 0:
                     # No previous item exists
-                    logging.warning(f"[{cell}] '{label}' is lw_rpt but has no previous item; putting into checkup as-is.")
+                    logging.warning(f"[{cell}] '{label}' is SAM_rpt but has no previous item; putting into checkup as-is.")
                     checkup_list.append((df, label))
                     i += 1
                     continue
