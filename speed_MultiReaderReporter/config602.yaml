@@ -36,15 +36,15 @@ legend:
 
 voltage:
   high: 3.6
-  highm: 3.45
-  lowm: 3.35
-  low: 2
+  highm: 3.42
+  lowm: 3.37
+  low: 3.32
 
 CU_steps:
   ocv_cha: [9, 22]
   ocv_dis: [6, 19]
   capa_cha: [2, 15]
-  capa_dis: [17, 9]
+  capa_dis: [12, 9]
 
 logging:
   verbose: true
