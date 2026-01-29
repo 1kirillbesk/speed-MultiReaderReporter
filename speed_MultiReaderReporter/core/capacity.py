@@ -324,22 +324,15 @@ def extract_features(df,cell,cfg):
     features = {}
     # dt = df["relative_time_s"].diff()
     # CU_num = [17, 2, 6, 9]
-    if df["procedure"].str.contains("sam_cu", case=False, na=False).any():
-        choice = 1
-        rpt_mask = (df["procedure"].str.contains("sam_cu", case=False, na=False))
-        rpt_cyc_mask = (df["procedure"].str.contains("sam_cu", case=False, na=False))
-    else:
-        choice = 0
-        rpt_mask = (df["procedure"].str.contains("rpt", case=False, na=False))
-        rpt_cyc_mask = (df["procedure"].str.contains("homocomp_sam", case=False, na=False))
-
+    choice = int((df.loc[df["step_int"] == 57, "current_A"] < 0).any())
+    rpt_mask = (df["procedure"].str.contains("Digi", case=False, na=False))
 
     ocv_cha_step = cfg['CU_steps']['ocv_cha'][choice]; ocv_dis_step = cfg['CU_steps']['ocv_dis'][choice]
-    capa_cha_step = cfg['CU_steps']['capa_cha'][choice]; capa_dis_step = cfg['CU_steps']['capa_dis'][choice]
+    capa_cha_step = cfg['CU_steps']['capa_cha'][0]; capa_dis_step = cfg['CU_steps']['capa_dis'][0]
     mask_ocv_cha = ((df["step_int"] == ocv_cha_step) & rpt_mask)
     mask_ocv_dis = ((df["step_int"] == ocv_dis_step) & rpt_mask)
     mask_capa_cha = ((df["step_int"] == capa_cha_step) & rpt_mask)
-    mask_capa_dis = ((df["step_int"] == capa_dis_step) & rpt_cyc_mask)
+    mask_capa_dis = ((df["step_int"] == capa_dis_step) & rpt_mask)
 
     df_ocv_cha = df.loc[mask_ocv_cha]; df_ocv_dis = df.loc[mask_ocv_dis]
     df_capa_cha = df.loc[mask_capa_cha]; df_capa_dis = df.loc[mask_capa_dis]

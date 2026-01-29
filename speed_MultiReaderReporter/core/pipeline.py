@@ -165,7 +165,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             for df_chk, lbl_chk in checkup_list:
                 try:
                     label_lower = lbl_chk.lower()
-                    if "cu" in label_lower or "rpt" in label_lower:
+                    if "checkup" in label_lower:
                         df_chk = df_chk.copy()
                         df_chk["abs_time"] = pd.to_datetime(df_chk["abs_time"], errors="coerce")
                         df_chk = df_chk.dropna(subset=["abs_time"])
@@ -173,15 +173,15 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
                         ocv_features = extract_features(df_chk, cell, cfg)
 
-                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse_SAM"].reset_index(drop=True)
+                        # df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse_SAM"].reset_index(drop=True)
                         # df_filtered = (
                         #     df_chk
                         #     .loc[df_chk.index[df_chk["step_int"] == 26].max() + 1:]
                         #     .query("0 <= step_int <= 15")
                         # )
-                        pulse_feature = analyze_df_pulse(df_filtered)
+                        #pulse_feature = analyze_df_pulse(df_filtered)
 
-                        features = ocv_features | pulse_feature
+                        features = ocv_features# | pulse_feature
                         rows.append(features)
                 except Exception as e:
                     logging.exception(f"[{cell}] feature extraction failed for checkup run '{lbl_chk}': {e}")

@@ -1,0 +1,65 @@
+# speed_MultiReaderReporter/config.yaml
+
+input:
+  path: "C:/Users/Public/Documents/RL_project/raw_data_csv_digi"     #"C:/Users/Public/Documents/takedata/Speed/raw_data_csv"      # folder OR single file; detector will recurse if it's a folder
+  recurse: true
+  name_contains: ["DigiBatt_checkup_v2", "DigiBatt_cycling_v2"]
+# C:/Users/Public/Documents/example_reporter
+# C:/Users/Public/Documents/takedata/Speed/
+output:
+  root: "C:/Users/Public/Documents/RL_project/out_digi"           # main pipeline will create per-cell subfolders under here
+
+reports:
+  format: "csv"    # one of: csv | mat | both
+  mat_variable: "report"   # name of the MATLAB struct variable
+
+classification:
+  cycling_keywords: ["cycling"]              # force cycling when present in program name
+  checkup_keywords: ["checkup"]
+  duration_threshold_minutes: 60    # < 1h → checkup
+  rpt_keywords: ["checkup"]
+  cu_keyword: "checkup"
+
+
+soh:
+  min_step_required: 20    # guard for step-19 logic
+  i_thresh_A: 0.0          # ignore |I| below this when integrating step-19
+  eod_v_cut_V: null        # set (e.g., 3.0) if you want early cutoff by voltage
+  export_data: true        # export the underlying SoH scatter data alongside the plot
+  include_rpt: true        # include RPT checkups (step-6) in SoH
+  rpt_min_step_required: null
+  rpt_trailing_step_id: null
+  rpt_require_trailing_step: false
+
+legend:
+  ncol: 4
+
+voltage:
+  high: 4.2
+  highm: 3.9
+  lowm: 3.6
+  low: 2.7
+
+CU_steps:
+  ocv_cha: [55, 56]
+  ocv_dis: [56, 57]
+  capa_cha: [15,15]
+  capa_dis: [12, 12]
+
+logging:
+  verbose: true
+
+checkup_grouping:
+  # Use ONE of: off | report | plot | both
+  mode: "both"                 # disables both computation & plotting when "off"
+
+  # Backward-compat (optional): if you still have old keys, they’re ignored
+  enabled: false              # ignored when 'mode' is set
+  plot_segments: false        # ignored when 'mode' is set
+
+  pause_label: "PAU"
+  min_points: 5
+  require_step_change: true
+
+  # Optional: limit plotted points per segment (for speed)
+  plot_max_points_per_segment: 5000
