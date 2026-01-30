@@ -15,7 +15,7 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('C:/Users/Public/Documents/RL_project/out_inhomo') / "errors.log"
+log_path = Path('C:/Users/Public/Documents/RL_project/out_jgne') / "errors.log"
 #C:/Users/Public/Documents/takedata/Speed/out_lw
 logging.basicConfig(
     filename=str(log_path),
@@ -173,7 +173,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
                         ocv_features = extract_features(df_chk, cell, cfg)
 
-                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse_SAM"].reset_index(drop=True)
+                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse"].reset_index(drop=True)
                         # df_filtered = (
                         #     df_chk
                         #     .loc[df_chk.index[df_chk["step_int"] == 26].max() + 1:]
@@ -450,11 +450,13 @@ def parse_experiment_label(label: str):
     """
     New format supports:
       ..._<x>c<y>_<socStart>soc<socEnd>_dyn   (dyn optional)
+      ..._<pause>h                           (pause optional)
 
     Extracts:
       - soc_start, soc_end
-      - c_rate_chg (x), c_rate_dchg (y)   [numbers around 'c']
+      - c_rate_chg (x), c_rate_dchg (y)
       - dyn (bool)
+      - pause (int)
     """
 
     result = {
@@ -463,6 +465,7 @@ def parse_experiment_label(label: str):
         "c_rate_chg": None,
         "c_rate_dchg": None,
         "dyn": False,
+        "pause": None,
     }
 
     lab = label.lower()
@@ -476,16 +479,19 @@ def parse_experiment_label(label: str):
         result["soc_start"] = int(m_soc.group(1))
         result["soc_end"] = int(m_soc.group(2))
 
-    # ---------- C-rate: _xcy_  e.g. _05c1_ or _0c25_ ----------
+    # ---------- C-rate: _xcy_ ----------
     m_c = re.search(r"_(\d+)c(\d+)_", lab)
     if m_c:
         def parse_c(val: str):
-            # minimal change: keep your old rule
-            # "05" -> 0.5, "15" -> 15.0
             return int(val) / 10 if val.startswith("0") and len(val) > 1 else float(val)
 
         result["c_rate_chg"] = parse_c(m_c.group(1))
         result["c_rate_dchg"] = parse_c(m_c.group(2))
+
+    # ---------- pause: _10h (must be at end) ----------
+    m_pause = re.search(r"_(\d+)h$", lab)
+    if m_pause:
+        result["pause"] = int(m_pause.group(1))
 
     return result
 
