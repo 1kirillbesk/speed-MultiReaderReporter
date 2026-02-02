@@ -15,7 +15,7 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('C:/Users/Public/Documents/RL_project/out_inhomo') / "errors.log"
+log_path = Path('E:/download/BALD/out_SAM_inhomo') / "errors.log"
 #C:/Users/Public/Documents/takedata/Speed/out_lw
 logging.basicConfig(
     filename=str(log_path),
