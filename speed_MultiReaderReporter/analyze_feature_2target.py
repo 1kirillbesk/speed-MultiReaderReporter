@@ -112,20 +112,20 @@ def main(dir_path: Path, out_dir: Path):
 
     # TWO target SOHs:
     target_soh_features = 0.998   # used to pick the feature row for comparisons
-    target_soh_plot = 0.98        # used to build the interpolated SOH curve grid (trajectories)
+    target_soh_plot = 0.985        # used to build the interpolated SOH curve grid (trajectories)
 
     rows = []
     rows_ref = []
 
     # The 3 reference cell names you want to use for "closest/farthest"
-    REF_NAMES = ["SPEED_LW_reference_13", "SPEED_LW_reference_14", "SPEED_LW_reference_15"]
+    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
 
     # SPEED: read only needed columns
     needed_cols = (
         ["CU_time"]
         + exp_conds
         + ["cap_ocv_dis"]
-        + ["mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_m_d", "var_d_dqdv_m_d", "mean_d_dqdv_h_c"]
+        + ["mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_m_d", "var_d_dqdv_m_d", "mean_d_dqdv_h_c","mean_d_dqdv_l_c"]
     )
 
     # ---- ONE plot for all cells (SOH trajectories) ----
@@ -174,6 +174,7 @@ def main(dir_path: Path, out_dir: Path):
             "mean_d_dqdv_m_d",
             "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c",
+            "mean_d_dqdv_l_c",
         ]
         missing = [c for c in interp_cols if c not in df.columns]
         if missing:
