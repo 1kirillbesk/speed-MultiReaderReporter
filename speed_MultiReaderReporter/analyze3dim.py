@@ -200,8 +200,8 @@ def main(dir_path: Path, out_dir: Path):
     exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
 
     # TWO target SOHs:
-    target_soh_features = 0.998   # feature row selection
-    target_soh_plot = 0.985       # interpolation grid for plotting
+    target_soh_features = 0.995   # feature row selection
+    target_soh_plot = 0.98       # interpolation grid for plotting
 
     rows = []
     rows_ref = []
