@@ -38,7 +38,10 @@ voltage:
   high: 3.6
   highm: 3.45
   lowm: 3.35
-  low: 2
+  low: 3.3
+  lowl: 3.15
+  uplim: 3.6
+  downlim: 2
 
 CU_steps:
   ocv_cha: [9, 22]

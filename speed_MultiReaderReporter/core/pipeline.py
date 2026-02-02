@@ -219,6 +219,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             vol_low = volt_lim["low"]
             vol_mhigh = volt_lim["highm"];
             vol_mlow = volt_lim["lowm"]
+            vol_llow = volt_lim["lowl"]
 
             mean_mid_cha, var_mid_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_mlow,
                                                               x_hi=vol_mhigh)
@@ -228,11 +229,15 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                                                                 x_lo=vol_mhigh, x_hi=vol_high)
             mean_dQ_cha, var_dQ_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="Q_intVcha", x_lo=vol_low,
                                                             x_hi=vol_high)
+            mean_low_cha_l, var_low_cha_l = window_delta_mean_var(df_summary, x_col="Vcha", y_col="Q_intVcha", x_lo=vol_llow,
+                                                            x_hi=vol_low)
 
             df_summary["mean_d_dqdv_m_c"] = mean_mid_cha;
             df_summary["var_d_dqdv_m_c"] = var_mid_cha
             df_summary["mean_d_dqdv_l_c"] = mean_low_cha;
             df_summary["var_d_dqdv_l_c"] = var_low_cha
+            df_summary["mean_d_dqdv_l_c_l"] = mean_low_cha_l;
+            df_summary["var_d_dqdv_l_c_l"] = var_low_cha_l
             df_summary["mean_d_dqdv_h_c"] = mean_high_cha;
             df_summary["var_d_dqdv_h_c"] = var_high_cha
             df_summary["mean_dQ_c"] = mean_dQ_cha;

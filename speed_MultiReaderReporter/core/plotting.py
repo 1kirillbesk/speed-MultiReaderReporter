@@ -192,6 +192,10 @@ def plot_curves(
     Saves to:
       cfg["output"]["root"]/plots/<y_col>/<cell>.png
     """
+    highm = cfg['voltage']['highm']
+    lowm= cfg['voltage']['lowm']
+    low= cfg['voltage']['low']
+    lowl= cfg['voltage']['lowl']
     n = len(df)
     cmap = cm.get_cmap("coolwarm")  # blue -> red
 
@@ -239,6 +243,25 @@ def plot_curves(
     sm.set_array([0, n - 1])
     cbar = fig.colorbar(sm, ax=ax)
     cbar.set_label("Row index")
+
+    ref_lines = {
+        "highm": highm,
+        "lowm": lowm,
+        "low": low,
+        "lowl": lowl,
+    }
+
+    for name, val in ref_lines.items():
+        if val is None:
+            continue
+        ax.axvline(
+            x=val,
+            linestyle="--",
+            linewidth=1,
+            color="k",
+            alpha=0.6,
+            zorder=0,
+        )
 
     ax.text(
         0.01, 0.99,

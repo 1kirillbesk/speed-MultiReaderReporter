@@ -400,7 +400,7 @@ def extract_ICA(df,cell,cfg):
 
     dV = np.diff(V)
     not_increasing = dV <= 0; not_decreasing = dV >= 0
-    above_threshold = V[1:] > cfg['voltage']['high']; below_threshold = V[1:] < cfg['voltage']['low']
+    above_threshold = V[1:] > cfg['voltage']['uplim']; below_threshold = V[1:] < cfg['voltage']['downlim']
     if current_rate > 0:
         stop_idx = np.where(not_increasing & above_threshold)[0]
     else:
@@ -423,7 +423,7 @@ def extract_ICA(df,cell,cfg):
         print(f"[WARN] {cell} RPT skipped (DVA): {e}")
 
     V_100, dQdV_100, Q_intV = resample_to_n(V_fine_ica, dQdV_smooth, Q_fine_ica,
-                                            x_lo=cfg['voltage']['low'], x_hi=cfg['voltage']['high'], n=1000)
+                                            x_lo=cfg['voltage']['downlim'], x_hi=cfg['voltage']['uplim'], n=1000)
 
     return V_100, dQdV_100, Q_intV
 
@@ -435,7 +435,7 @@ def extract_DVA(df,cell,cfg):
 
     dV = np.diff(V)
     not_increasing = dV <= 0; not_decreasing = dV >= 0
-    above_threshold = V[1:] > cfg['voltage']['high']; below_threshold = V[1:] < cfg['voltage']['low']
+    above_threshold = V[1:] > cfg['voltage']['uplim']; below_threshold = V[1:] < cfg['voltage']['downlim']
     if current_rate > 0:
         stop_idx = np.where(not_increasing & above_threshold)[0]
     else:
@@ -469,7 +469,7 @@ def extract_ITA(df,cell,cfg):
 
     dV = np.diff(V)
     not_increasing = dV <= 0; not_decreasing = dV >= 0
-    above_threshold = V[1:] > cfg['voltage']['high']; below_threshold = V[1:] < cfg['voltage']['low']
+    above_threshold = V[1:] > cfg['voltage']['uplim']; below_threshold = V[1:] < cfg['voltage']['downlim']
     if current_rate > 0:
         stop_idx = np.where(not_increasing & above_threshold)[0]
     else:
@@ -492,7 +492,7 @@ def extract_ITA(df,cell,cfg):
         print(f"[WARN] {cell} RPT skipped (DVA): {e}")
 
     V_100, dTdV_100, T_intV = resample_to_n(V_fine_ica, dTdV_smooth, T_fine_ica,
-                                            x_lo=cfg['voltage']['low'], x_hi=cfg['voltage']['high'], n=1000)
+                                            x_lo=cfg['voltage']['downlim'], x_hi=cfg['voltage']['uplim'], n=1000)
 
     return V_100, dTdV_100, T_intV
 
