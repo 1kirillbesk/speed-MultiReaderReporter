@@ -324,6 +324,7 @@ def extract_features(df,cell,cfg):
     features = {}
     # dt = df["relative_time_s"].diff()
     # CU_num = [17, 2, 6, 9]
+    proc = df["procedure"].astype(str)
     if df["procedure"].str.contains("lw_cu", case=False, na=False).any():
         choice = 1
         rpt_mask = (df["procedure"].str.contains("lw_cu", case=False, na=False))
@@ -332,6 +333,13 @@ def extract_features(df,cell,cfg):
         choice = 0
         rpt_mask = (df["procedure"].str.contains("rpt", case=False, na=False))
         rpt_cyc_mask = (df["procedure"].str.contains("LWcp", case=False, na=False))
+        lwcp_rows = proc[proc.str.contains("LWcp", case=False, na=False)]
+
+        if not lwcp_rows.empty:
+            last_token = lwcp_rows.iloc[0].rsplit("_", 1)[-1]
+            if last_token == "25":
+                choice = 2
+
 
 
     ocv_cha_step = cfg['CU_steps']['ocv_cha'][choice]; ocv_dis_step = cfg['CU_steps']['ocv_dis'][choice]

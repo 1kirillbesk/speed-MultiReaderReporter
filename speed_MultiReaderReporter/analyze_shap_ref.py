@@ -669,6 +669,7 @@ def monte_carlo_best_conditions(
     scaler = results[any_target]["scaler"]
     expected_cols = ["soc", "dod", "c_rate_chg", "c_rate_dchg", "temp"]
     X_mc = X_mc[expected_cols]
+    X_mc.loc[X_mc["c_rate_chg"] == 15, "c_rate_chg"] = 1.5
 
     scaler = results[any_target]["scaler"]
 
