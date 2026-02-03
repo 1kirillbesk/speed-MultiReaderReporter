@@ -254,6 +254,8 @@ def main(dir_path: Path, out_dir: Path):
     idx_at_soh_gauss_exp: dict[str, int] = {}
     soh_series_exp: dict[str, np.ndarray] = {}
 
+    cells_below_08 = []
+
     for csv_file in dir_path.glob("*.csv"):
         cell_name = csv_file.stem
 
@@ -307,6 +309,10 @@ def main(dir_path: Path, out_dir: Path):
         if interpolated_plot_weeks is None or interpolated_plot_weeks.empty:
             print(f"[WARN] {cell_name}: interpolation (weeks) failed, skipping.")
             continue
+        if "SOH" in interpolated_plot_weeks.columns:
+            min_soh = float(np.nanmin(interpolated_plot_weeks["SOH"].to_numpy(dtype=float)))
+            if min_soh < 0.8:
+                cells_below_08.append((cell_name, min_soh))
 
         traj_by_cell_weeks[cell_name] = interpolated_plot_weeks[["weeks", "SOH"]].copy()
 
@@ -826,6 +832,7 @@ def main(dir_path: Path, out_dir: Path):
     )
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
+    ax.set_ylim(0.8, 1.1)
     fig.tight_layout()
 
     ax_w.set_xlabel("weeks")
@@ -849,6 +856,13 @@ def main(dir_path: Path, out_dir: Path):
     fig_t.tight_layout()
 
     plt.show()
+    if cells_below_08:
+        cells_below_08_sorted = sorted(cells_below_08, key=lambda x: x[1])  # lowest SOH first
+        print("\nCells with SOH < 0.8 (min SOH shown):")
+        for cn, m in cells_below_08_sorted:
+            print(f" - {cn}: min SOH = {m:.3f}")
+    else:
+        print("\nNo cells reached SOH < 0.8.")
     return df_exp, df_ref
 
 
