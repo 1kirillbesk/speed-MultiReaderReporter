@@ -3,13 +3,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from scipy.interpolate import CubicSpline
-
-# NEW: 3D plotting
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+from scipy.optimize import linear_sum_assignment
 
 
 # --- relative paths ---
@@ -18,12 +17,6 @@ sys.path.append(str(here))
 sys.path.append(str(here / "core"))
 sys.path.append(str(here / "loaders"))
 sys.path.append(str(here / "utils"))
-
-
-def gaussian_pdf(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
-    """Gaussian PDF; sigma is clamped to avoid division by zero."""
-    sigma = float(max(sigma, 1e-12))
-    return (1.0 / (sigma * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
 
 # -----------------------------
@@ -63,7 +56,6 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     target_data = df["SOH"].to_numpy(dtype=float)
 
     # need strictly increasing x for CubicSpline
-    # remove duplicates in reference if any
     ref_s = pd.Series(reference)
     keep = ~ref_s.duplicated(keep="first")
     df = df.loc[keep.values].reset_index(drop=True)
@@ -105,8 +97,6 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     interpolated_columns = []
     for j in range(feature.shape[1]):
         yj = feature[:, j]
-
-        # If there are NaNs, fallback to linear (CubicSpline cannot handle NaNs)
         if np.isnan(yj).any():
             interpolated_columns.append(np.interp(new_ref_points, reference, yj))
             continue
@@ -122,7 +112,7 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     out = pd.DataFrame(interpolated_data, columns=feature_cols)
     out[ref_name] = new_ref_points
 
-    # Optional safety: clip SOH to [0, 1.05] (CubicSpline can overshoot)
+    # Optional safety: clip SOH to [0, 1.05]
     if "SOH" in out.columns:
         out["SOH"] = out["SOH"].clip(lower=0.0, upper=1.05)
 
@@ -130,15 +120,10 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
 
 
 def exp_row_from_first_line(df: pd.DataFrame, exp_conds: list[str]) -> pd.Series:
-    """Return exp condition values from row 0 as a Series."""
     return df.loc[0, exp_conds]
 
 
 def weeks_to_reach_soh(traj_weeks: pd.DataFrame, soh_target: float) -> float | None:
-    """
-    Return interpolated weeks when SOH reaches soh_target.
-    Returns None if curve never reaches soh_target or data invalid.
-    """
     if traj_weeks is None or traj_weeks.empty:
         return None
     if "weeks" not in traj_weeks.columns or "SOH" not in traj_weeks.columns:
@@ -153,17 +138,13 @@ def weeks_to_reach_soh(traj_weeks: pd.DataFrame, soh_target: float) -> float | N
     if len(w) < 3:
         return None
 
-    # If it never reaches the target (SOH stays above target)
     if np.nanmin(s) > soh_target:
         return None
 
-    # Interpolate weeks at target SOH:
-    # sort by SOH to ensure monotonic xp for np.interp (robust to slight wiggles)
     idx = np.argsort(s)  # SOH ascending
     s_sorted = s[idx]
     w_sorted = w[idx]
 
-    # remove duplicate SOH values
     keep = ~pd.Series(s_sorted).duplicated(keep="first")
     s_sorted = s_sorted[keep.values]
     w_sorted = w_sorted[keep.values]
@@ -173,24 +154,96 @@ def weeks_to_reach_soh(traj_weeks: pd.DataFrame, soh_target: float) -> float | N
     return float(np.interp(soh_target, s_sorted, w_sorted))
 
 
-def idx_first_reach_soh(traj: pd.DataFrame, soh_target: float) -> int | None:
+# -----------------------------
+# 2D signature + Wasserstein (assignment)
+# -----------------------------
+def feature_signature_2d(
+    traj: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    soh_hi: float,
+    soh_lo: float,
+    n_points: int,
+    time_col: str = "weeks",
+) -> np.ndarray | None:
     """
-    Return the FIRST integer index where interpolated SOH reaches <= soh_target.
-    Returns None if never reaches.
+    Build a 2D signature point cloud with shape (n_points, 2), sampled uniformly in TIME
+    between t0 and t(SOH=soh_lo), and evaluated via CubicSpline vs time.
     """
-    if traj is None or traj.empty or "SOH" not in traj.columns:
+    if traj is None or traj.empty:
+        return None
+    needed = {time_col, "SOH", x_col, y_col}
+    if not needed.issubset(set(traj.columns)):
         return None
 
+    t = traj[time_col].to_numpy(dtype=float)
     s = traj["SOH"].to_numpy(dtype=float)
-    ok = ~np.isnan(s)
-    if not np.any(ok):
-        return None
-    s = s[ok]
+    x = traj[x_col].to_numpy(dtype=float)
+    y = traj[y_col].to_numpy(dtype=float)
 
-    hit = np.where(s <= soh_target)[0]
-    if len(hit) == 0:
+    ok = ~np.isnan(t) & ~np.isnan(s) & ~np.isnan(x) & ~np.isnan(y)
+    t, s, x, y = t[ok], s[ok], x[ok], y[ok]
+    if len(t) < 3:
         return None
-    return int(hit[0])
+
+    # Must reach soh_lo
+    if np.nanmin(s) > soh_lo:
+        return None
+
+    # time at SOH=soh_lo
+    idx = np.argsort(s)  # SOH ascending
+    s_sorted = s[idx]
+    t_sorted = t[idx]
+    keep_s = ~pd.Series(s_sorted).duplicated(keep="first")
+    s_sorted = s_sorted[keep_s.values]
+    t_sorted = t_sorted[keep_s.values]
+    if len(s_sorted) < 2:
+        return None
+
+    t0 = float(t[0])
+    t1 = float(np.interp(soh_lo, s_sorted, t_sorted))
+    if not np.isfinite(t1) or t1 <= t0:
+        return None
+
+    ts = np.linspace(t0, t1, n_points)
+
+    # CubicSpline requires strictly increasing time
+    keep_t = ~pd.Series(t).duplicated(keep="first")
+    t_u = t[keep_t.values]
+    x_u = x[keep_t.values]
+    y_u = y[keep_t.values]
+    if len(t_u) < 3:
+        return None
+
+    def eval_spline(tu: np.ndarray, fu: np.ndarray, tq: np.ndarray) -> np.ndarray:
+        try:
+            cs = CubicSpline(tu, fu, bc_type="natural", extrapolate=False)
+            out = cs(tq)
+        except Exception:
+            out = np.interp(tq, tu, fu)
+        return out
+
+    x_sig = eval_spline(t_u, x_u, ts)
+    y_sig = eval_spline(t_u, y_u, ts)
+
+    if np.isnan(x_sig).any() or np.isnan(y_sig).any():
+        return None
+
+    return np.stack([x_sig.astype(float), y_sig.astype(float)], axis=1)
+
+
+def wasserstein_2d_assignment(sig_a: np.ndarray, sig_b: np.ndarray) -> float:
+    """Mean matched Euclidean cost (Hungarian assignment) between two equal-weight point clouds."""
+    if sig_a is None or sig_b is None:
+        return float("nan")
+    k = min(sig_a.shape[0], sig_b.shape[0])
+    A = sig_a[:k]
+    B = sig_b[:k]
+
+    diff = A[:, None, :] - B[None, :, :]
+    C = np.linalg.norm(diff, axis=2)
+    r, c = linear_sum_assignment(C)
+    return float(C[r, c].mean())
 
 
 # -----------------------------
@@ -199,25 +252,29 @@ def idx_first_reach_soh(traj: pd.DataFrame, soh_target: float) -> int | None:
 def main(dir_path: Path, out_dir: Path):
     exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
 
-    # TWO target SOHs:
-    target_soh_features = 0.995   # feature row selection
-    target_soh_plot = 0.98       # interpolation grid for plotting
+    # Two knobs:
+    target_soh_features = 0.995   # <-- used for WASSERSTEIN signature (SOH_hi -> this)
+    target_soh_plot = 0.98        # <-- used for plotting interpolation / grids
+
+    # 2D Wasserstein feature config
+    X_COL = "mean_d_dqdv_m_c"
+    Y_COL = "mean_d_dqdv_h_c"
+
+    # signature config (SOH_hi fixed at 1.0, SOH_lo = target_soh_features)
+    SOH_SIG_HI = 1.0
+    SOH_SIG_LO = target_soh_features
+    SIG_NPTS = 5
 
     rows = []
     rows_ref = []
 
-    # Reference cell names
-    REF_NAMES = ["SPEED_LW_reference_3", "SPEED_LW_reference_4", "SPEED_LW_reference_5"]
+    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
 
-    # CONFIG YOU WANT:
-    K_CLOSEST_FEATURE = 25   # keep 20 closest in feature space -> ORANGE
-    K_SLOWEST_BLACK = 1      # among those closest, mark slowest-aging in BLACK
-    SOH_SLOW_TARGET = 0.96   # "slow" defined by max weeks to reach this SOH
+    K_CLOSEST_FEATURE = 15
+    K_FARTHEST = 20
+    K_SLOWEST_BLACK = 1
+    SOH_SLOW_TARGET = 0.96
 
-    # NEW: Gaussian distribution target (index where SOH reaches this)
-    SOH_DIST_TARGET = 0.97
-
-    # SPEED: read only needed columns
     needed_cols = (
         ["CU_time"]
         + exp_conds
@@ -245,21 +302,12 @@ def main(dir_path: Path, out_dir: Path):
     added_blue_label_t = False
     added_red_label_t = False
 
-    # Keep interpolated trajectories
     traj_by_cell_weeks: dict[str, pd.DataFrame] = {}
     traj_by_cell_thr: dict[str, pd.DataFrame] = {}
-
-    # For Gaussian distributions (optional bookkeeping you had)
-    SOH_GAUSS_TARGET = 0.965
-    idx_at_soh_gauss_exp: dict[str, int] = {}
-    soh_series_exp: dict[str, np.ndarray] = {}
-
-    cells_below_08 = []
 
     for csv_file in dir_path.glob("*.csv"):
         cell_name = csv_file.stem
 
-        # Read only columns we need
         try:
             df = pd.read_csv(csv_file, usecols=lambda c: c in needed_cols)
         except Exception as e:
@@ -270,7 +318,6 @@ def main(dir_path: Path, out_dir: Path):
             print(f"[WARN] {cell_name}: missing CU_time, skipping.")
             continue
 
-        # weeks computation
         t = pd.to_datetime(df["CU_time"], errors="coerce", cache=True)
         if t.isna().all():
             print(f"[WARN] {cell_name}: CU_time invalid, skipping.")
@@ -279,13 +326,11 @@ def main(dir_path: Path, out_dir: Path):
         t0 = t.iloc[0]
         df["weeks"] = (t - t0).dt.total_seconds() / (7 * 24 * 3600)
 
-        # exp conditions
         if any(c not in df.columns for c in exp_conds):
             print(f"[WARN] {cell_name}: missing exp_conds, skipping.")
             continue
         exp_row = exp_row_from_first_line(df, exp_conds)
 
-        # Interpolation input (weeks-based)
         interp_cols_weeks = [
             "weeks",
             "cap_ocv_dis",
@@ -305,23 +350,14 @@ def main(dir_path: Path, out_dir: Path):
 
         df_filter_weeks = df[interp_cols_weeks].copy()
 
+        # IMPORTANT CHANGE:
+        # - for plotting & trajectory storage, interpolate to target_soh_plot (not target_soh_features)
         interpolated_plot_weeks = load_and_interpolate(df_filter_weeks, target_soh_plot, interpolation_typ="weeks")
         if interpolated_plot_weeks is None or interpolated_plot_weeks.empty:
             print(f"[WARN] {cell_name}: interpolation (weeks) failed, skipping.")
             continue
-        if "SOH" in interpolated_plot_weeks.columns:
-            min_soh = float(np.nanmin(interpolated_plot_weeks["SOH"].to_numpy(dtype=float)))
-            if min_soh < 0.8:
-                cells_below_08.append((cell_name, min_soh))
 
-        traj_by_cell_weeks[cell_name] = interpolated_plot_weeks[["weeks", "SOH"]].copy()
-
-        # gaussian bookkeeping for exp cells
-        if not exp_row.isna().any():
-            soh_arr = interpolated_plot_weeks["SOH"].to_numpy(dtype=float)
-            idx_g = int(np.argmin(np.abs(soh_arr - SOH_GAUSS_TARGET)))
-            idx_at_soh_gauss_exp[cell_name] = idx_g
-            soh_series_exp[cell_name] = soh_arr
+        traj_by_cell_weeks[cell_name] = interpolated_plot_weeks.copy()
 
         # throughput interpolation
         interp_cols_thr = [
@@ -409,10 +445,9 @@ def main(dir_path: Path, out_dir: Path):
                     zorder=2,
                 )
 
-        # --- pick the feature row for distance comparisons (uses target_soh_features) ---
+        # --- metadata row for df_exp/df_ref should use target_soh_features (as you requested) ---
         idx_feat = (interpolated_plot_weeks["SOH"] - target_soh_features).abs().idxmin()
         row_feat = interpolated_plot_weeks.loc[idx_feat]
-
         combined_row = pd.concat([pd.Series({"cell_name": cell_name}), exp_row, row_feat], axis=0)
 
         if exp_row.isna().any():
@@ -426,7 +461,7 @@ def main(dir_path: Path, out_dir: Path):
     df_exp = pd.DataFrame(rows).reset_index(drop=True)
 
     # -----------------------------
-    # Explicitly plot the 3 references again (visible on top) on ALL plots
+    # Plot references on top
     # -----------------------------
     added_ref_label = False
     for ref_name in REF_NAMES:
@@ -439,7 +474,7 @@ def main(dir_path: Path, out_dir: Path):
             color="red",
             alpha=0.95,
             linewidth=1.6,
-            label="SPEED_LW_reference_13..15" if not added_ref_label else None,
+            label="SPEED_LW_reference_4..6" if not added_ref_label else None,
             zorder=3,
         )
         ax_w.plot(
@@ -448,7 +483,7 @@ def main(dir_path: Path, out_dir: Path):
             color="red",
             alpha=0.95,
             linewidth=1.6,
-            label="SPEED_LW_reference_13..15" if not added_ref_label else None,
+            label="SPEED_LW_reference_4..6" if not added_ref_label else None,
             zorder=3,
         )
 
@@ -460,196 +495,132 @@ def main(dir_path: Path, out_dir: Path):
                 color="red",
                 alpha=0.95,
                 linewidth=1.6,
-                label="SPEED_LW_reference_13..15" if not added_ref_label else None,
+                label="SPEED_LW_reference_4..6" if not added_ref_label else None,
                 zorder=3,
             )
 
         added_ref_label = True
 
     # -----------------------------
-    # Closest/farthest in feature space (NOW 3D)
+    # 2D Wasserstein distance to nearest reference
+    # Uses target_soh_features as the SOH_LO of the signature
     # -----------------------------
-    x_col = "mean_d_dqdv_m_c"
-    y_col = "mean_d_dqdv_l_c"
-    z_col = "mean_d_dqdv_h_c"  # NEW
-
-    K_FARTHEST = 20
-
-    ref_sub = df_ref[df_ref["cell_name"].isin(REF_NAMES)][["cell_name", x_col, y_col, z_col]].dropna().reset_index(drop=True)
-    exp_sub = df_exp[["cell_name", x_col, y_col, z_col]].dropna().reset_index(drop=True)
-
-    closest_cellnames: list[str] = []
-    farthest_cellnames: list[str] = []
-    slowest_black_cellnames: list[str] = []
-
-    if ref_sub.empty:
-        print(f"[WARN] None of REF_NAMES found in df_ref: {REF_NAMES}")
-    elif exp_sub.empty:
-        print("[WARN] df_exp has no valid rows for the selected feature columns.")
-    else:
-        ref_xyz = ref_sub[[x_col, y_col, z_col]].to_numpy(dtype=float)
-        exp_xyz = exp_sub[[x_col, y_col, z_col]].to_numpy(dtype=float)
-
-        # -------------------------------------------------
-        # UNIFIED normalization (refs + exp together)
-        # -------------------------------------------------
-        all_xyz = np.vstack([ref_xyz, exp_xyz])
-
-        # mu = all_xyz.mean(axis=0)
-        # sd = all_xyz.std(axis=0, ddof=1)
-        # sd = np.maximum(sd, 1e-12)  # numerical safety
-        # ref_n = (ref_xyz - mu) / sd
-        # exp_n = (exp_xyz - mu) / sd
-
-        # scale = all_xyz.std(axis=0, ddof=1)
-        # scale = np.maximum(scale, 1e-12)
-        # ref_n = ref_xyz / scale
-        # exp_n = exp_xyz / scale
-
-        q25 = np.quantile(all_xyz, 0.25, axis=0)
-        q75 = np.quantile(all_xyz, 0.75, axis=0)
-        scale = q75 - q25
-        scale = np.maximum(scale, 1e-12)  # numerical safety
-        ref_n = ref_xyz / scale
-        exp_n = exp_xyz / scale
-
-        # -------------------------------------------------
-        # Equal weighting (explicit but trivial)
-        # -------------------------------------------------
-        # (kept explicit so future weighting is easy)
-        weights = np.array([1.0, 1.0, 1.0], dtype=float)
-        ref_n *= weights
-        exp_n *= weights
-
-        # -------------------------------------------------
-        # Distance to NEAREST reference
-        # -------------------------------------------------
-        dists = np.linalg.norm(exp_n[:, None, :] - ref_n[None, :, :], axis=2)
-        dist = np.min(dists, axis=1)
-
-        k1 = min(K_CLOSEST_FEATURE, len(exp_sub))
-        closest_idx = np.argsort(dist)[:k1]
-        closest_cellnames = exp_sub.loc[closest_idx, "cell_name"].tolist()
-
-        k2 = min(K_FARTHEST, len(exp_sub))
-        farthest_idx = np.argsort(dist)[-k2:]
-        farthest_cellnames = exp_sub.loc[farthest_idx, "cell_name"].tolist()
-
-        print(f"\nClosest {len(closest_cellnames)} exp cells (orange) to NEAREST(ref) at SOH={target_soh_features}:")
-        for cn in closest_cellnames:
-            print(" -", cn)
-
-        print("\nExperimental conditions for closest experiments:")
-
-        cols_to_print = ["cell_name"] + exp_conds
-
-        df_closest_conds = (
-            df_exp[df_exp["cell_name"].isin(closest_cellnames)]
-            [cols_to_print]
-            .sort_values("cell_name")
+    ref_sigs: dict[str, np.ndarray] = {}
+    for rn in REF_NAMES:
+        sig = feature_signature_2d(
+            traj_by_cell_weeks.get(rn),
+            X_COL, Y_COL,
+            soh_hi=SOH_SIG_HI,
+            soh_lo=SOH_SIG_LO,   # == target_soh_features
+            n_points=SIG_NPTS,
+            time_col="weeks",
         )
+        if sig is not None:
+            ref_sigs[rn] = sig
 
-        print(df_closest_conds.to_string(index=False))
+    if len(ref_sigs) == 0:
+        print(f"[WARN] No valid 2D reference signatures for ({X_COL}, {Y_COL}).")
+        closest_cellnames, farthest_cellnames, slowest_black_cellnames = [], [], []
+        dist_df = pd.DataFrame(columns=["cell_name", "dist_w2d", "best_ref"])
+    else:
+        exp_names = df_exp["cell_name"].dropna().unique().tolist()
+        dist_list: list[tuple[str, float, str]] = []
 
-        # -----------------------------
-        # pick slowest-aging among the closest (weeks to reach SOH_SLOW_TARGET)
-        # -----------------------------
+        for cn in exp_names:
+            sig_e = feature_signature_2d(
+                traj_by_cell_weeks.get(cn),
+                X_COL, Y_COL,
+                soh_hi=SOH_SIG_HI,
+                soh_lo=SOH_SIG_LO,   # == target_soh_features
+                n_points=SIG_NPTS,
+                time_col="weeks",
+            )
+            if sig_e is None:
+                continue
+
+            best_d = np.inf
+            best_r = ""
+            for rn, sig_r in ref_sigs.items():
+                d = wasserstein_2d_assignment(sig_e, sig_r)
+                if d < best_d:
+                    best_d = d
+                    best_r = rn
+
+            if np.isfinite(best_d) and best_r:
+                dist_list.append((cn, float(best_d), best_r))
+
+        dist_df = pd.DataFrame(dist_list, columns=["cell_name", "dist_w2d", "best_ref"])
+        dist_df = dist_df.sort_values("dist_w2d", ascending=True).reset_index(drop=True)
+
+        k1 = min(K_CLOSEST_FEATURE, len(dist_df))
+        closest_cellnames = dist_df.loc[: k1 - 1, "cell_name"].tolist()
+
+        k2 = min(K_FARTHEST, len(dist_df))
+        farthest_cellnames = dist_df.loc[len(dist_df) - k2 :, "cell_name"].tolist()
+
+        # print closest with distance
+        print(f"\nClosest {len(closest_cellnames)} exp cells (orange) by 2D Wasserstein (SOH 1.0 -> {target_soh_features}):")
+        for cn in closest_cellnames:
+            row = dist_df[dist_df["cell_name"] == cn].iloc[0]
+            print(f" - {cn}: d={row['dist_w2d']:.6g} (best_ref={row['best_ref']})")
+
+        # Slowest among closest
         scores: list[tuple[str, float]] = []
         for cn in closest_cellnames:
             traj_w = traj_by_cell_weeks.get(cn)
-            w_at = weeks_to_reach_soh(traj_w, SOH_SLOW_TARGET)
+            if traj_w is None:
+                continue
+            w_at = weeks_to_reach_soh(traj_w[["weeks", "SOH"]], SOH_SLOW_TARGET)
             if w_at is None:
                 continue
             scores.append((cn, float(w_at)))
 
         if len(scores) == 0:
             print(f"\n[WARN] None of the closest cells reached SOH={SOH_SLOW_TARGET}. No black highlight.")
+            slowest_black_cellnames = []
         else:
             scores_sorted = sorted(scores, key=lambda t: t[1], reverse=True)
             n_black = min(K_SLOWEST_BLACK, len(scores_sorted))
             slowest_black_cellnames = [cn for cn, _ in scores_sorted[:n_black]]
-
-            print(
-                f"\nSlowest-aging among closest {len(closest_cellnames)} "
-                f"(max weeks to reach SOH={SOH_SLOW_TARGET}):"
-            )
+            print(f"\nSlowest-aging among closest (max weeks to reach SOH={SOH_SLOW_TARGET}):")
             for cn, w_at in scores_sorted[:n_black]:
                 print(f" - {cn}: ~{w_at:.2f} weeks")
 
-        # -----------------------------
-        # 3D scatter figure
-        # -----------------------------
-        ref_mean = ref_sub[[x_col, y_col, z_col]].mean().to_numpy(dtype=float)
-
-        fig_sc = plt.subplots(figsize=(8, 7))[0]
-        ax_sc = fig_sc.add_subplot(111, projection="3d")
-
-        # all exp
-        ax_sc.scatter(
-            exp_sub[x_col], exp_sub[y_col], exp_sub[z_col],
-            s=18, alpha=0.7, color="blue",
-            label="exp (all)",
+    # -----------------------------
+    # Visualize Wasserstein distances
+    # -----------------------------
+    if not dist_df.empty:
+        fig_d, ax_d = plt.subplots(figsize=(9, 4))
+        y = dist_df["dist_w2d"].to_numpy(float)
+        x = np.arange(len(y))
+        ax_d.plot(x, y, linewidth=1.4)
+        ax_d.set_title(
+            f"2D Wasserstein distance to nearest reference ({X_COL}, {Y_COL})\n"
+            f"signature SOH 1.0 -> {target_soh_features}, n={SIG_NPTS}"
         )
+        ax_d.set_xlabel("cells (sorted by distance)")
+        ax_d.set_ylabel("distance (avg matched Euclidean cost)")
+        ax_d.grid(True, alpha=0.3)
 
-        # farthest
-        ax_sc.scatter(
-            exp_sub.loc[farthest_idx, x_col],
-            exp_sub.loc[farthest_idx, y_col],
-            exp_sub.loc[farthest_idx, z_col],
-            s=70, alpha=0.95, color="green",
-            edgecolors="k", linewidths=0.6,
-            label=f"farthest {k2}",
-        )
+        if closest_cellnames:
+            idx_cl = dist_df.index[: min(len(dist_df), K_CLOSEST_FEATURE)]
+            ax_d.scatter(idx_cl, y[idx_cl], s=35, color="orange", label="closest")
+        if farthest_cellnames:
+            idx_fa = dist_df.index[len(dist_df) - min(len(dist_df), K_FARTHEST) :]
+            ax_d.scatter(idx_fa, y[idx_fa], s=35, color="green", label="farthest")
+        ax_d.legend(loc="best")
+        fig_d.tight_layout()
 
-        # closest
-        ax_sc.scatter(
-            exp_sub.loc[closest_idx, x_col],
-            exp_sub.loc[closest_idx, y_col],
-            exp_sub.loc[closest_idx, z_col],
-            s=70, alpha=0.95, color="orange",
-            edgecolors="k", linewidths=0.6,
-            label=f"closest {k1}",
-        )
-
-        # highlight slowest among closest
-        if slowest_black_cellnames:
-            row_black = exp_sub[exp_sub["cell_name"].isin(slowest_black_cellnames)]
-            if not row_black.empty:
-                ax_sc.scatter(
-                    row_black[x_col], row_black[y_col], row_black[z_col],
-                    s=180, color="black", marker="*",
-                    edgecolors="k", linewidths=0.8,
-                    label=f"slowest among closest (SOH={SOH_SLOW_TARGET})",
-                )
-
-        # refs
-        ax_sc.scatter(
-            ref_sub[x_col], ref_sub[y_col], ref_sub[z_col],
-            s=90, alpha=1.0, color="red",
-            edgecolors="k", linewidths=0.8,
-            label="refs",
-        )
-
-        # mean(refs)
-        ax_sc.scatter(
-            [ref_mean[0]], [ref_mean[1]], [ref_mean[2]],
-            s=150, color="black", marker="X",
-            label="mean(refs)",
-        )
-
-        ax_sc.set_xlabel(x_col)
-        ax_sc.set_ylabel(y_col)
-        ax_sc.set_zlabel(z_col)
-        ax_sc.set_title(f"3D feature space at SOH={target_soh_features}: distance to nearest(ref)")
-        ax_sc.legend()
-
-        # optional nicer view angle
-        ax_sc.view_init(elev=20, azim=45)
-
-        fig_sc.tight_layout()
+        fig_h, ax_h = plt.subplots(figsize=(7, 4))
+        ax_h.hist(y, bins=30)
+        ax_h.set_title("Histogram of 2D Wasserstein distances")
+        ax_h.set_xlabel("distance")
+        ax_h.set_ylabel("count")
+        ax_h.grid(True, alpha=0.3)
+        fig_h.tight_layout()
 
     # -----------------------------
-    # Overlay trajectories: closest = orange, farthest = green
+    # Overlay trajectories: closest = orange, farthest = green, slowest = black
     # -----------------------------
     added_orange_label = False
     added_orange_label_w = False
@@ -660,38 +631,18 @@ def main(dir_path: Path, out_dir: Path):
         if traj_w is None:
             continue
 
-        ax.plot(
-            traj_w["SOH"],
-            color="orange",
-            alpha=0.85,
-            linewidth=1.0,
-            label="closest exp (orange)" if not added_orange_label else None,
-            zorder=4,
-        )
+        ax.plot(traj_w["SOH"], color="orange", alpha=0.85, linewidth=1.0,
+                label="closest exp (orange)" if not added_orange_label else None, zorder=4)
         added_orange_label = True
 
-        ax_w.plot(
-            traj_w["weeks"],
-            traj_w["SOH"],
-            color="orange",
-            alpha=0.85,
-            linewidth=1.0,
-            label="closest exp (orange)" if not added_orange_label_w else None,
-            zorder=4,
-        )
+        ax_w.plot(traj_w["weeks"], traj_w["SOH"], color="orange", alpha=0.85, linewidth=1.0,
+                  label="closest exp (orange)" if not added_orange_label_w else None, zorder=4)
         added_orange_label_w = True
 
         traj_t = traj_by_cell_thr.get(cn)
         if traj_t is not None:
-            ax_t.plot(
-                traj_t["throughput_cum"],
-                traj_t["SOH"],
-                color="orange",
-                alpha=0.85,
-                linewidth=1.0,
-                label="closest exp (orange)" if not added_orange_label_t else None,
-                zorder=4,
-            )
+            ax_t.plot(traj_t["throughput_cum"], traj_t["SOH"], color="orange", alpha=0.85, linewidth=1.0,
+                      label="closest exp (orange)" if not added_orange_label_t else None, zorder=4)
             added_orange_label_t = True
 
     added_green_label = False
@@ -703,146 +654,37 @@ def main(dir_path: Path, out_dir: Path):
         if traj_w is None:
             continue
 
-        ax.plot(
-            traj_w["SOH"],
-            color="green",
-            alpha=0.85,
-            linewidth=1.0,
-            label="farthest exp (green)" if not added_green_label else None,
-            zorder=5,
-        )
+        ax.plot(traj_w["SOH"], color="green", alpha=0.85, linewidth=1.0,
+                label="farthest exp (green)" if not added_green_label else None, zorder=5)
         added_green_label = True
 
-        ax_w.plot(
-            traj_w["weeks"],
-            traj_w["SOH"],
-            color="green",
-            alpha=0.85,
-            linewidth=1.0,
-            label="farthest exp (green)" if not added_green_label_w else None,
-            zorder=5,
-        )
+        ax_w.plot(traj_w["weeks"], traj_w["SOH"], color="green", alpha=0.85, linewidth=1.0,
+                  label="farthest exp (green)" if not added_green_label_w else None, zorder=5)
         added_green_label_w = True
 
         traj_t = traj_by_cell_thr.get(cn)
         if traj_t is not None:
-            ax_t.plot(
-                traj_t["throughput_cum"],
-                traj_t["SOH"],
-                color="green",
-                alpha=0.85,
-                linewidth=1.0,
-                label="farthest exp (green)" if not added_green_label_t else None,
-                zorder=5,
-            )
+            ax_t.plot(traj_t["throughput_cum"], traj_t["SOH"], color="green", alpha=0.85, linewidth=1.0,
+                      label="farthest exp (green)" if not added_green_label_t else None, zorder=5)
             added_green_label_t = True
 
-    # -----------------------------
-    # Overlay slowest among closest in BLACK on all 3 plots
-    # -----------------------------
     added_black_label = False
     for cn in slowest_black_cellnames:
         traj_w_black = traj_by_cell_weeks.get(cn)
         if traj_w_black is None:
             continue
 
-        ax.plot(
-            traj_w_black["SOH"],
-            color="black",
-            alpha=1.0,
-            linewidth=2.4,
-            label="slowest among closest (black)" if not added_black_label else None,
-            zorder=10,
-        )
-        ax_w.plot(
-            traj_w_black["weeks"],
-            traj_w_black["SOH"],
-            color="black",
-            alpha=1.0,
-            linewidth=2.4,
-            label="slowest among closest (black)" if not added_black_label else None,
-            zorder=10,
-        )
+        ax.plot(traj_w_black["SOH"], color="black", alpha=1.0, linewidth=2.4,
+                label="slowest among closest (black)" if not added_black_label else None, zorder=10)
+        ax_w.plot(traj_w_black["weeks"], traj_w_black["SOH"], color="black", alpha=1.0, linewidth=2.4,
+                  label="slowest among closest (black)" if not added_black_label else None, zorder=10)
 
         traj_t_black = traj_by_cell_thr.get(cn)
         if traj_t_black is not None:
-            ax_t.plot(
-                traj_t_black["throughput_cum"],
-                traj_t_black["SOH"],
-                color="black",
-                alpha=1.0,
-                linewidth=2.4,
-                label="slowest among closest (black)" if not added_black_label else None,
-                zorder=10,
-            )
+            ax_t.plot(traj_t_black["throughput_cum"], traj_t_black["SOH"], color="black", alpha=1.0, linewidth=2.4,
+                      label="slowest among closest (black)" if not added_black_label else None, zorder=10)
 
         added_black_label = True
-
-    # -----------------------------
-    # NEW: Gaussian distributions of INDEX where SOH first reaches 0.96
-    # Groups:
-    #   ORANGE = closest_cellnames
-    #   GREEN  = farthest_cellnames
-    #   BLUE   = all other exp cells (excluding orange & green)
-    # -----------------------------
-    exp_all = df_exp["cell_name"].dropna().unique().tolist()
-    orange_cells = list(dict.fromkeys(closest_cellnames))
-    green_cells = list(dict.fromkeys(farthest_cellnames))
-    orange_set = set(orange_cells)
-    green_set = set(green_cells)
-    blue_cells = [cn for cn in exp_all if (cn not in orange_set) and (cn not in green_set)]
-
-    idx_blue, idx_orange, idx_green = [], [], []
-
-    for cn in blue_cells:
-        idx = idx_first_reach_soh(traj_by_cell_weeks.get(cn), SOH_DIST_TARGET)
-        if idx is not None:
-            idx_blue.append(idx)
-
-    for cn in orange_cells:
-        idx = idx_first_reach_soh(traj_by_cell_weeks.get(cn), SOH_DIST_TARGET)
-        if idx is not None:
-            idx_orange.append(idx)
-
-    for cn in green_cells:
-        idx = idx_first_reach_soh(traj_by_cell_weeks.get(cn), SOH_DIST_TARGET)
-        if idx is not None:
-            idx_green.append(idx)
-
-    print(f"\nIndex where interpolated SOH first reaches <= {SOH_DIST_TARGET}:")
-    print(f"  BLUE   (other exp): n={len(idx_blue)}   mean={np.mean(idx_blue) if idx_blue else np.nan:.2f}")
-    print(f"  ORANGE (closest)  : n={len(idx_orange)} mean={np.mean(idx_orange) if idx_orange else np.nan:.2f}")
-    print(f"  GREEN  (farthest) : n={len(idx_green)}  mean={np.mean(idx_green) if idx_green else np.nan:.2f}")
-
-    fig_g, ax_g = plt.subplots(figsize=(9, 5))
-
-    def plot_gauss(ax, data, label, color, bins=25):
-        if len(data) < 2:
-            return  # not enough points to estimate sigma
-        data = np.asarray(data, dtype=float)
-        mu = float(np.mean(data))
-        sigma = float(np.std(data, ddof=1))
-        sigma = max(sigma, 1e-6)
-
-        ax.hist(data, bins=bins, density=True, alpha=0.25, color=color)
-
-        x_min = float(np.min(data) - 3.0 * sigma)
-        x_max = float(np.max(data) + 3.0 * sigma)
-        x = np.linspace(x_min, x_max, 400)
-        y = gaussian_pdf(x, mu, sigma)
-        ax.plot(x, y, color=color, linewidth=2.0, label=f"{label}: μ={mu:.1f}, σ={sigma:.1f}, n={len(data)}")
-
-    plot_gauss(ax_g, idx_blue,   "BLUE (other exp)", "blue")
-    plot_gauss(ax_g, idx_orange, "ORANGE (closest)", "orange")
-    plot_gauss(ax_g, idx_green,  "GREEN (farthest)", "green")
-
-    ax_g.set_ylim(0, 1.5)
-    ax_g.set_xlabel(f"index where interpolated SOH first <= {SOH_DIST_TARGET}")
-    ax_g.set_ylabel("density")
-    ax_g.set_title(f"Gaussian distributions of reach-index at SOH={SOH_DIST_TARGET} (interpolated SOH)")
-    ax_g.grid(True, alpha=0.3)
-    ax_g.legend(loc="best")
-    fig_g.tight_layout()
 
     # -----------------------------
     # Finalize plots
@@ -851,44 +693,34 @@ def main(dir_path: Path, out_dir: Path):
     ax.set_ylabel("SOH")
     ax.set_title(
         f"SOH trajectories (index-x) (plot interpolation target SOH={target_soh_plot}; "
-        f"feature comparison at SOH={target_soh_features})"
+        f"W2D uses signature SOH 1.0 -> {target_soh_features}, n={SIG_NPTS})"
     )
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
-    ax.set_ylim(0.8, 1.1)
     fig.tight_layout()
 
     ax_w.set_xlabel("weeks")
     ax_w.set_ylabel("SOH")
     ax_w.set_title(
         f"SOH trajectories vs weeks (plot interpolation target SOH={target_soh_plot}; "
-        f"feature comparison at SOH={target_soh_features})"
+        f"W2D uses signature SOH 1.0 -> {target_soh_features}, n={SIG_NPTS})"
     )
     ax_w.grid(True, alpha=0.3)
     ax_w.legend(loc="best")
-    ax_w.set_ylim(0.8, 1.1)
     fig_w.tight_layout()
 
     ax_t.set_xlabel("throughput_cum")
     ax_t.set_ylabel("SOH")
     ax_t.set_title(
         f"SOH trajectories vs throughput_cum (plot interpolation target SOH={target_soh_plot}; "
-        f"feature comparison at SOH={target_soh_features})"
+        f"W2D uses signature SOH 1.0 -> {target_soh_features}, n={SIG_NPTS})"
     )
     ax_t.grid(True, alpha=0.3)
     ax_t.legend(loc="best")
-    ax_t.set_ylim(0.8, 1.1)
     fig_t.tight_layout()
 
     plt.show()
-    if cells_below_08:
-        cells_below_08_sorted = sorted(cells_below_08, key=lambda x: x[1])  # lowest SOH first
-        print("\nCells with SOH < 0.8 (min SOH shown):")
-        for cn, m in cells_below_08_sorted:
-            print(f" - {cn}: min SOH = {m:.3f}")
-    else:
-        print("\nNo cells reached SOH < 0.8.")
-    return df_exp, df_ref
+    return df_exp, df_ref, dist_df
 
 
 if __name__ == "__main__":

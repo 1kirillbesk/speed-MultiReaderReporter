@@ -109,7 +109,7 @@ def exp_row_from_first_line(df: pd.DataFrame, exp_conds: list[str]) -> pd.Series
 # -----------------------------
 def main(dir_path: Path, out_dir: Path):
     exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
-    target_soh = 0.98
+    target_soh = 0.99
 
     rows = []
     rows_ref = []
@@ -261,7 +261,7 @@ def main(dir_path: Path, out_dir: Path):
     if y_col not in df_ref.columns or y_col not in df_exp.columns:
         y_col = "mean_d_dqdv_h_c"  # fallback
 
-    K_CLOSEST = 30
+    K_CLOSEST = 20
     K_FARTHEST = 15
 
     ref_sub = df_ref[df_ref["cell_name"].isin(REF_NAMES)][["cell_name", x_col, y_col]].dropna().reset_index(drop=True)

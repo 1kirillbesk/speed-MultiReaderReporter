@@ -965,11 +965,11 @@ if __name__ == "__main__":
     best10 = monte_carlo_best_conditions(
         df_exp=df_exp,
         results=results,
-        target_cols=["mean_d_dqdv_m_c","mean_d_dqdv_h_c"],
+        target_cols=["mean_d_dqdv_m_c","mean_d_dqdv_h_c","mean_d_dqdv_l_c"],
         n_samples=200,
         top_k=10,
         reference_key="lw_reference",
-        aggregate="l1",  # sum of abs deltas across the three
+        aggregate="l2",  # sum of abs deltas across the three
     )
 
     # best10, scales = monte_carlo_best_conditions_normalized(

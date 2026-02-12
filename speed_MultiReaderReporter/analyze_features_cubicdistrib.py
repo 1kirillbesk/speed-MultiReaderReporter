@@ -187,7 +187,7 @@ def main(dir_path: Path, out_dir: Path):
     REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
 
     # CONFIG YOU WANT:
-    K_CLOSEST_FEATURE = 15   # keep 15 closest in feature space -> ORANGE
+    K_CLOSEST_FEATURE = 25   # keep 15 closest in feature space -> ORANGE
     K_SLOWEST_BLACK = 1      # among those 15, mark the slowest-aging in BLACK (set 3/5 if you want multiple)
     SOH_SLOW_TARGET = 0.96   # "slow" defined by max weeks to reach this SOH
 
