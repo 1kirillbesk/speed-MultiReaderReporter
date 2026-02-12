@@ -12,6 +12,7 @@ import xgboost as xgb
 import shap
 import matplotlib.pyplot as plt
 
+REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
 
 # -----------------------------
 # Helpers
@@ -34,7 +35,8 @@ def scatter_features_vs_reference(
 
     The x-axis is a categorical index (with jitter), y-axis is the feature value.
     """
-    ref_mask = df_exp["cell_name"].astype(str).str.lower().str.contains(reference_key.lower())
+    # ref_mask = df_exp["cell_name"].astype(str).str.lower().str.contains(reference_key.lower())
+    ref_mask = df_exp["cell_name"].astype(str).isin(REF_NAMES)
     df_ref = df_exp.loc[ref_mask].copy()
     df_non = df_exp.loc[~ref_mask].copy()
 
@@ -432,6 +434,211 @@ def train_and_shap_kernel_multi(
 
     return results
 
+def train_and_shap_kernel_multi_no_val(
+    df_exp: pd.DataFrame,
+    exp_conds: List[str] = None,
+    target_cols: List[str] = None,
+    reference_key: str = "lw_reference",
+    test_size: float = 0.1,          # set to 0.0 if you want NO test split at all
+    random_state: int = 42,
+    n_show: int = 500,               # how many rows to explain/plot
+    background_size: int = 200,      # KernelExplainer background subset (speed!)
+    n_iter_search: int = 60,
+    cv_splits: int = 5,
+) -> Dict[str, Dict[str, Any]]:
+
+    if exp_conds is None:
+        exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
+
+    if target_cols is None:
+        target_cols = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c", "mean_d_dqdv_l_c"]
+
+    # --- Identify reference rows ---
+    # ref_mask = df_exp["cell_name"].astype(str).str.lower().str.contains(reference_key.lower())
+    ref_mask = df_exp["cell_name"].astype(str).isin(REF_NAMES)
+    # if ref_mask.sum() == 0:
+    #     raise ValueError(f"No reference rows found: cell_name contains '{reference_key}'")
+    if ref_mask.sum() == 0:
+        raise ValueError(f"No reference rows found in REF_NAMES: {REF_NAMES}")
+
+    # --- Reference baseline (one value per target) ---
+    ref_baseline = {}
+    for tcol in target_cols:
+        ref_vals = coerce_series_to_float_1d(df_exp.loc[ref_mask, tcol])
+        ref_baseline[tcol] = float(np.nanmean(ref_vals))
+        if np.isnan(ref_baseline[tcol]):
+            raise ValueError(f"Reference baseline for {tcol} is NaN (check reference data).")
+
+    # --- Use ONLY non-reference rows for training ---
+    df_train = df_exp.loc[~ref_mask].reset_index(drop=True)
+
+    # ---- Build X ----
+    X = df_train[exp_conds].copy().apply(pd.to_numeric, errors="coerce")
+
+    # ---- Feature engineering: SOC + DOD ----
+    X["soc"] = 0.5 * (X["soc_start"] + X["soc_end"])
+    X["dod"] = X["soc_end"] - X["soc_start"]
+    X = X.drop(columns=["soc_start", "soc_end"])
+    exp_conds_fe = ["soc", "dod", "c_rate_chg", "c_rate_dchg", "temp"]
+
+    # your special handling
+    X.loc[X["c_rate_chg"] == 15, "c_rate_chg"] = 1.5
+
+    # ---- Build y deltas ----
+    y_dict = {}
+    for tcol in target_cols:
+        y_raw = coerce_series_to_float_1d(df_train[tcol])
+        y_dict[tcol] = y_raw - ref_baseline[tcol]
+
+    # ---- Keep only rows where ALL targets are valid ----
+    valid_mask = np.ones(len(df_train), dtype=bool)
+    for tcol in target_cols:
+        valid_mask &= ~np.isnan(y_dict[tcol])
+
+    X = X.loc[valid_mask].reset_index(drop=True)
+    for tcol in target_cols:
+        y_dict[tcol] = y_dict[tcol][valid_mask]
+
+    # Fill missing X with median, cast float
+    X = X.fillna(X.median(numeric_only=True)).astype(float)
+
+    # ---- Optional test split (can disable by test_size=0.0) ----
+    idx_all = np.arange(len(X))
+    if test_size and test_size > 0:
+        idx_train, idx_test = train_test_split(
+            idx_all, test_size=test_size, random_state=random_state
+        )
+        X_train = X.iloc[idx_train].reset_index(drop=True)
+        X_test = X.iloc[idx_test].reset_index(drop=True)
+    else:
+        idx_train = idx_all
+        idx_test = np.array([], dtype=int)
+        X_train = X.reset_index(drop=True)
+        X_test = X.iloc[0:0].copy()
+
+    # ---- MinMax scale (fit on TRAIN; if no test, still fine) ----
+    scaler = MinMaxScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_train_scaled_df = pd.DataFrame(X_train_scaled, columns=exp_conds_fe)
+
+    if len(idx_test) > 0:
+        X_test_scaled = scaler.transform(X_test)
+        X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=exp_conds_fe)
+    else:
+        X_test_scaled = None
+        X_test_scaled_df = None
+
+    base_model = xgb.XGBRegressor(
+        objective="reg:squarederror",
+        tree_method="hist",
+        random_state=random_state,
+    )
+
+    param_dist = {
+        "max_depth": [2, 3, 4, 5, 6],
+        "learning_rate": np.linspace(0.005, 0.15, 30).tolist(),
+        "min_child_weight": [1, 2, 5, 10, 20, 40],
+        "subsample": np.linspace(0.5, 1.0, 11).tolist(),
+        "colsample_bytree": np.linspace(0.5, 1.0, 11).tolist(),
+        "gamma": [0.0, 0.01, 0.05, 0.1, 0.2, 0.5, 1.0],
+        "reg_alpha": [0.0, 1e-4, 1e-3, 1e-2, 0.05, 0.1, 0.2, 0.5, 1.0],
+        "reg_lambda": [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0],
+    }
+
+    cv = KFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+
+    results: Dict[str, Dict[str, Any]] = {}
+
+    for tcol in target_cols:
+        y = y_dict[tcol].astype(float)
+
+        if len(idx_test) > 0:
+            y_train = y[idx_train]
+            y_test = y[idx_test]
+        else:
+            y_train = y
+            y_test = None
+
+        search = RandomizedSearchCV(
+            estimator=base_model,
+            param_distributions=param_dist,
+            n_iter=n_iter_search,
+            scoring="neg_root_mean_squared_error",
+            cv=cv,
+            verbose=1,
+            random_state=random_state,
+            n_jobs=-1,
+        )
+
+        # --- NO validation / NO eval_set ---
+        search.fit(X_train_scaled, y_train)
+
+        best_model = search.best_estimator_
+
+        # Optional test metrics
+        if len(idx_test) > 0:
+            y_pred = best_model.predict(X_test_scaled)
+            r2 = r2_score(y_test, y_pred)
+            rmse = float(np.sqrt(mean_squared_error(y_test, y_pred)))
+        else:
+            r2, rmse = None, None
+
+        print(f"\nTarget (delta from reference): {tcol}")
+        print("Reference baseline:", ref_baseline[tcol])
+        print("Best params:", search.best_params_)
+        if r2 is not None:
+            print("R²:", r2)
+            print("RMSE:", rmse)
+        else:
+            print("No test split (test_size=0.0) => no R²/RMSE reported.")
+
+        # ---- SHAP KernelExplainer on TRAINING (100%) ----
+        X_sample = X_train_scaled_df
+
+        # background subset for speed (still trained on 100%!)
+        if background_size is None or background_size <= 0 or background_size >= len(X_train_scaled_df):
+            X_background = X_train_scaled_df
+        else:
+            X_background = X_train_scaled_df.sample(
+                n=background_size, random_state=random_state
+            ).reset_index(drop=True)
+
+        def predict_fn(x):
+            return best_model.predict(np.asarray(x))
+
+        explainer = shap.KernelExplainer(predict_fn, X_background)
+
+        n_plot = min(n_show, X_sample.shape[0])
+        shap_values = explainer.shap_values(X_sample.iloc[:n_plot])
+
+        shap.summary_plot(shap_values, X_sample.iloc[:n_plot], show=False)
+        plt.title(f"SHAP summary (beeswarm) — Δ target: {tcol}")
+        plt.tight_layout()
+        plt.show()
+
+        shap.summary_plot(shap_values, X_sample.iloc[:n_plot], plot_type="bar", show=False)
+        plt.title(f"SHAP feature importance (bar) — Δ target: {tcol}")
+        plt.tight_layout()
+        plt.show()
+
+        results[tcol] = {
+            "model": best_model,
+            "best_params": search.best_params_,
+            "ref_baseline": ref_baseline,   # store all baselines
+            "explainer": explainer,
+            "shap_values": shap_values,
+            "scaler": scaler,
+            "X_train": X_train,
+            "X_train_scaled": X_train_scaled,
+            "X_test": X_test,
+            "X_test_scaled": X_test_scaled,
+            "y_train": y_train,
+            "y_test": y_test,
+            "metrics": {"r2": r2, "rmse": rmse},
+        }
+
+    return results
+
 
 def monte_carlo_best_conditions_normalized(
     df_exp: pd.DataFrame,
@@ -602,7 +809,8 @@ def monte_carlo_best_conditions(
     rng = np.random.default_rng(random_state)
 
     # ---- choose bounds from non-reference data ----
-    ref_mask = df_exp["cell_name"].astype(str).str.lower().str.contains(reference_key.lower())
+    #ref_mask = df_exp["cell_name"].astype(str).str.lower().str.contains(reference_key.lower())
+    ref_mask = df_exp["cell_name"].astype(str).isin(REF_NAMES)
     df_train = df_exp.loc[~ref_mask].copy()
 
     exp_conds_raw = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
@@ -630,25 +838,35 @@ def monte_carlo_best_conditions(
         raise ValueError("bounds_from must be 'data' or 'custom'")
 
     # ---- sample uniformly within bounds ----
-    soc_start = rng.uniform(bounds["soc_start"][0], bounds["soc_start"][1], n_samples)
-    soc_end   = rng.uniform(bounds["soc_end"][0], bounds["soc_end"][1], n_samples)
+    # soc_start = rng.uniform(bounds["soc_start"][0], bounds["soc_start"][1], n_samples)
+    # soc_end   = rng.uniform(bounds["soc_end"][0], bounds["soc_end"][1], n_samples)
+    soc_start_choices = np.arange(0, 61, 10, dtype=float)  # 0..60 (step 10)
+    soc_end_choices = np.arange(40, 101, 10, dtype=float)  # 40..100 (step 10)
+
+    soc_start = rng.choice(soc_start_choices, size=n_samples, replace=True)
+
     c_chg     = rng.uniform(bounds["c_rate_chg"][0], bounds["c_rate_chg"][1], n_samples)
     c_dchg    = rng.uniform(bounds["c_rate_dchg"][0], bounds["c_rate_dchg"][1], n_samples)
     # temp      = rng.uniform(bounds["temp"][0], bounds["temp"][1], n_samples)
     temp = rng.choice([15.0, 25.0, 40.0], size=n_samples, replace=True)
 
     # ---- enforce constraints ----
-    soc_start = np.clip(soc_start, 0, 100)
-    soc_end   = np.clip(soc_end, 0, 100)
+    # soc_start = np.clip(soc_start, 0, 100)
+    # soc_end   = np.clip(soc_end, 0, 100)
+#
+    # # ensure soc_end >= soc_start by swapping where needed
+    # swap_mask = soc_end < soc_start
+    # soc_start2 = soc_start.copy()
+    # soc_end2 = soc_end.copy()
+    # soc_start2[swap_mask], soc_end2[swap_mask] = soc_end2[swap_mask], soc_start2[swap_mask]
+#
+    # soc_start, soc_end = soc_start2, soc_end2
 
-    # ensure soc_end >= soc_start by swapping where needed
-    swap_mask = soc_end < soc_start
-    soc_start2 = soc_start.copy()
-    soc_end2 = soc_end.copy()
-    soc_start2[swap_mask], soc_end2[swap_mask] = soc_end2[swap_mask], soc_start2[swap_mask]
-
-    soc_start, soc_end = soc_start2, soc_end2
-
+    soc_end = np.empty(n_samples, dtype=float)
+    for i, s0 in enumerate(soc_start):
+        lo = max(40.0, float(s0) + 10.0)  # enforce at least 10 higher, and >=40
+        valid_ends = soc_end_choices[soc_end_choices >= lo]
+        soc_end[i] = rng.choice(valid_ends)
     # ---- engineer features like training ----
     soc = 0.5 * (soc_start + soc_end)
     dod = soc_end - soc_start
@@ -717,20 +935,30 @@ def monte_carlo_best_conditions(
 # -----------------------------
 if __name__ == "__main__":
     dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-    target_soh = 0.998
+    target_soh = 0.995
 
     df_exp = build_experiment_table(dir_path, target_soh)
     print("df_exp shape:", df_exp.shape)
     print(df_exp[["cell_name", "mean_d_dqdv_m_c"]].head())
 
-    results = train_and_shap_kernel_multi(
+    # results = train_and_shap_kernel_multi(
+    #     df_exp,
+    #     target_cols=["mean_d_dqdv_m_c", "mean_d_dqdv_h_c", "mean_d_dqdv_l_c"],
+    #     reference_key="lw_reference",
+    # )
+
+    results = train_and_shap_kernel_multi_no_val(
         df_exp,
         target_cols=["mean_d_dqdv_m_c", "mean_d_dqdv_h_c", "mean_d_dqdv_l_c"],
         reference_key="lw_reference",
+        test_size=0.0,  # keep if you still want a final test report
+        # test_size=0.0,      # use this if you want literally 100% train and no test
+        background_size=200,  # increase if you want more faithful KernelExplainer background
     )
+
     scatter_features_vs_reference(
         df_exp,
-        feature_names=["temp", "c_rate_chg", "c_rate_dchg", "mean_d_dqdv_m_c"],
+        feature_names=["mean_d_dqdv_l_c", "mean_d_dqdv_h_c", "mean_d_dqdv_m_c"],
         reference_key="lw_reference",
     )
 
@@ -738,7 +966,7 @@ if __name__ == "__main__":
         df_exp=df_exp,
         results=results,
         target_cols=["mean_d_dqdv_m_c","mean_d_dqdv_h_c"],
-        n_samples=1000,
+        n_samples=200,
         top_k=10,
         reference_key="lw_reference",
         aggregate="l1",  # sum of abs deltas across the three
