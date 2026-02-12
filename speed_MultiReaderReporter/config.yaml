@@ -47,8 +47,8 @@ CU_steps:
   ocv_cha: [9, 22, 9]
   ocv_dis: [6, 19, 6]
   capa_cha: [2, 15, 2]
-  capa_dis: [17, 9, 12]
-
+  capa_dis: [11, 9, 12]
+# 17
 logging:
   verbose: true
 

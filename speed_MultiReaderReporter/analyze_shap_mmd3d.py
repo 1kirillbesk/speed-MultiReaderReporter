@@ -333,7 +333,7 @@ def main(dir_path: Path, out_dir: Path):
     SIG_NPTS = 5
 
     # Reference cell names
-    REF_NAMES = ["SPEED_LW_reference_16", "SPEED_LW_reference_17"]
+    REF_NAMES = ["SPEED_LW_reference_25", "SPEED_LW_reference_26"]
 
     # Selection config
     K_CLOSEST_FEATURE = 20
