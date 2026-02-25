@@ -524,6 +524,303 @@ def gaussian_pdf(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
     return (1.0 / (sigma * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
 
+def interpolate_y_at_x(
+    x: np.ndarray, y: np.ndarray, x_target: float
+) -> float | None:
+    """
+    Linear interpolation of y(x) at x_target.
+    Requires x to span x_target and have at least 2 unique points.
+    Returns None if not possible.
+    """
+    ok = np.isfinite(x) & np.isfinite(y)
+    x = x[ok]
+    y = y[ok]
+    if len(x) < 2:
+        return None
+
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+
+    # remove duplicated x (keep first)
+    keep = ~pd.Series(x).duplicated(keep="first").to_numpy()
+    x = x[keep]
+    y = y[keep]
+    if len(x) < 2:
+        return None
+
+    if x_target < x[0] or x_target > x[-1]:
+        return None
+
+    return float(np.interp(x_target, x, y))
+
+
+def cap_fraction_crossing_time_and_throughput(
+    df_traj: pd.DataFrame,
+    *,
+    cap_col: str = "cap_ocv_dis",   # change to "cap_dis" if that's your real column
+    time_col: str = "weeks",
+    thr_col: str = "throughput_cum",
+    frac: float = 0.93,
+) -> tuple[float, float] | None:
+    """
+    Find time when cap reaches frac*cap0 (first crossing), and throughput at that time.
+    Uses linear interpolation between the bracketing samples in TIME.
+    Returns (weeks_at_cap_frac, throughput_at_cap_frac).
+    Drops cells that never reach the fraction.
+    """
+    needed = {cap_col, time_col, thr_col}
+    if not needed.issubset(df_traj.columns):
+        return None
+
+    d = df_traj[[time_col, cap_col, thr_col]].copy()
+    d = d.apply(pd.to_numeric, errors="coerce").dropna()
+    if len(d) < 3:
+        return None
+
+    t = d[time_col].to_numpy(float)
+    cap = d[cap_col].to_numpy(float)
+    thr = d[thr_col].to_numpy(float)
+
+    # sort by time
+    order = np.argsort(t)
+    t, cap, thr = t[order], cap[order], thr[order]
+
+    cap0 = cap[0]
+    if not np.isfinite(cap0) or cap0 == 0:
+        return None
+    target = frac * cap0
+
+    # FILTER: must actually reach target
+    if np.nanmin(cap) > target:
+        return None
+
+    # first index where cap <= target
+    idx = np.where(cap <= target)[0]
+    if len(idx) == 0:
+        return None
+    i1 = int(idx[0])
+    if i1 == 0:
+        return None
+    i0 = i1 - 1
+
+    t0, t1 = t[i0], t[i1]
+    c0, c1 = cap[i0], cap[i1]
+    thr0, thr1 = thr[i0], thr[i1]
+
+    denom = (c1 - c0)
+    if denom == 0 or not np.isfinite(denom):
+        return None
+
+    alpha = (target - c0) / denom
+    if not np.isfinite(alpha):
+        return None
+
+    t_star = t0 + alpha * (t1 - t0)
+    thr_star = thr0 + alpha * (thr1 - thr0)
+
+    if not (np.isfinite(t_star) and np.isfinite(thr_star)):
+        return None
+
+    return float(t_star), float(thr_star)
+
+
+def build_regression_table_cap93_and_var_at_thr(
+    cell_names: list[str],
+    traj_dict: dict[str, pd.DataFrame],
+    *,
+    cap_col: str = "cap_ocv_dis",   # change if needed
+    time_col: str = "weeks",
+    thr_col: str = "throughput_cum",
+    var_col: str = "var_dQ_c",
+    cap_frac: float = 0.93,
+    throughput_target: float = 500_000.0,
+) -> pd.DataFrame:
+    """
+    Per cell:
+      y  = weeks_at_cap93
+      x1 = throughput_at_cap93
+      x2 = var_dQ_c_at_throughput_500k (interpolated in throughput domain)
+    Filters out cells that:
+      - do not reach cap_frac
+      - do not span throughput_target (can't interpolate var_dQ_c at 500k)
+    """
+    rows = []
+    for cn in cell_names:
+        df = traj_dict.get(cn)
+        if df is None:
+            continue
+
+        # 1) weeks + throughput at cap93 crossing
+        cap_out = cap_fraction_crossing_time_and_throughput(
+            df,
+            cap_col=cap_col,
+            time_col=time_col,
+            thr_col=thr_col,
+            frac=cap_frac,
+        )
+        if cap_out is None:
+            continue
+        weeks_cap, thr_cap = cap_out
+
+        # 2) var_dQ_c at throughput ~500k (exact interp at 500k)
+        if not {thr_col, var_col}.issubset(df.columns):
+            continue
+        thr = pd.to_numeric(df[thr_col], errors="coerce").to_numpy(float)
+        varq = pd.to_numeric(df[var_col], errors="coerce").to_numpy(float)
+        var_at_thr = interpolate_y_at_x(thr, varq, throughput_target)
+        if var_at_thr is None:
+            continue
+
+        rows.append(
+            {
+                "cell_name": cn,
+                "weeks_at_cap93": weeks_cap,
+                "throughput_at_cap93": thr_cap,
+                f"{var_col}_at_thr500k": var_at_thr,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def fit_linear_regression_numpy(
+    df_reg: pd.DataFrame,
+    x_cols: list[str],
+    y_col: str,
+) -> dict:
+    if df_reg is None or df_reg.empty:
+        return {"ok": False, "reason": "empty dataframe"}
+
+    d = df_reg[x_cols + [y_col]].copy()
+    d = d.apply(pd.to_numeric, errors="coerce").dropna()
+    if len(d) < max(3, len(x_cols) + 1):
+        return {"ok": False, "reason": f"not enough rows after dropna: {len(d)}"}
+
+    X = d[x_cols].to_numpy(float)
+    y = d[y_col].to_numpy(float)
+
+    X1 = np.column_stack([np.ones(len(X)), X])
+    beta, *_ = np.linalg.lstsq(X1, y, rcond=None)
+    y_hat = X1 @ beta
+
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - float(np.mean(y))) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    return {
+        "ok": True,
+        "n": int(len(d)),
+        "y_col": y_col,
+        "intercept": float(beta[0]),
+        "coef": {x_cols[i]: float(beta[i + 1]) for i in range(len(x_cols))},
+        "r2": float(r2),
+    }
+
+def plot_loglog_scatter_and_polyfit_cycle_only(
+    df_points: pd.DataFrame,
+    *,
+    x_col: str = "var_dQ_c_at_thr500k",
+    y_col: str = "throughput_at_cap93",
+    name_col: str = "cell_name",
+    fit_substring: str = "cycle",
+    ref_names: list[str] | None = None,
+    title: str = "log-log fit: throughput@cap93 vs var_dQ_c@thr500k (fit only: '*cycle*')",
+):
+    if df_points is None or df_points.empty:
+        print("[WARN] plot_loglog_scatter_and_polyfit_cycle_only: empty df.")
+        return None
+
+    ref_set = set(ref_names or [])
+
+    d = df_points[[name_col, x_col, y_col]].copy()
+    d[x_col] = pd.to_numeric(d[x_col], errors="coerce")
+    d[y_col] = pd.to_numeric(d[y_col], errors="coerce")
+    d = d.dropna(subset=[x_col, y_col, name_col])
+
+    # log requires positive values
+    d = d[(d[x_col] > 0) & (d[y_col] > 0)]
+    if d.empty:
+        print("[WARN] No positive finite points for log-log plot.")
+        return None
+
+    is_ref = d[name_col].astype(str).isin(ref_set)
+    is_fit = d[name_col].astype(str).str.contains(fit_substring, case=False, na=False)
+
+    d_ref = d[is_ref].copy()
+    d_fit = d[is_fit].copy()
+    d_other = d[~is_ref].copy()
+
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+
+    # scatter all non-ref cells (blue-ish default)
+    ax.scatter(
+        d_other[x_col].to_numpy(float),
+        d_other[y_col].to_numpy(float),
+        s=25,
+        alpha=0.45,
+        label="all (non-ref)",
+    )
+
+    # reference cells in red
+    if not d_ref.empty:
+        ax.scatter(
+            d_ref[x_col].to_numpy(float),
+            d_ref[y_col].to_numpy(float),
+            s=55,
+            alpha=0.95,
+            color="red",
+            label="refs",
+            zorder=5,
+        )
+
+    # highlight fit subset (cycle) (over non-ref)
+    if not d_fit.empty:
+        ax.scatter(
+            d_fit[x_col].to_numpy(float),
+            d_fit[y_col].to_numpy(float),
+            s=40,
+            alpha=0.9,
+            label=f"fit cells: '*{fit_substring}*'",
+            zorder=6,
+        )
+
+        # polyfit in log10 space (fit only)
+        x_feature = np.log10(d_fit[x_col].to_numpy(float))
+        y_life = np.log10(d_fit[y_col].to_numpy(float))
+
+        coefficients = np.polyfit(x_feature, y_life, 1)
+        poly_fit = np.poly1d(coefficients)
+
+        x_min = float(d[x_col].min())
+        x_max = float(d[x_col].max())
+        x_line = np.logspace(np.log10(x_min), np.log10(x_max), 200)
+        y_line = 10 ** (poly_fit(np.log10(x_line)))
+
+        ax.plot(
+            x_line,
+            y_line,
+            linewidth=2.0,
+            label=f"fit: log10(y)=a*log10(x)+b (a={coefficients[0]:.3g})",
+            zorder=7,
+        )
+
+        print("\n[polyfit log-log]")
+        print(f"coefficients (a,b) for log10(y)=a*log10(x)+b: {coefficients}")
+        print(f"poly1d: {poly_fit}")
+    else:
+        print(f"[WARN] No cells matched substring '{fit_substring}' => no fit line drawn.")
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_col)
+    ax.set_title(title)
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    return fig, ax
+
 # ============================================================
 # Main
 # ============================================================
@@ -579,6 +876,7 @@ def main(dir_path: Path, out_dir: Path):
 
     traj_by_cell_weeks: dict[str, pd.DataFrame] = {}
     traj_by_cell_thr: dict[str, pd.DataFrame] = {}
+    traj_by_cell_reg: dict[str, pd.DataFrame] = {}
 
     rows = []
     rows_ref = []
@@ -602,7 +900,10 @@ def main(dir_path: Path, out_dir: Path):
             continue
 
         t0 = t.iloc[0]
-        df["weeks"] = (t - t0).dt.total_seconds() / (7 * 24 * 3600)
+        df["weeks"] = (t - t0).dt.total_seconds() / (7 * 24 * 3600)#var_dQ_c
+        reg_cols = ["weeks", "throughput_cum", "mean_d_dqdv_m_c", "cap_ocv_dis"]  # or "cap_dis"
+        if all(c in df.columns for c in reg_cols):
+            traj_by_cell_reg[cell_name] = df[reg_cols].copy()
 
         if any(c not in df.columns for c in exp_conds):
             print(f"[WARN] {cell_name}: missing exp_conds, skipping.")
@@ -615,6 +916,7 @@ def main(dir_path: Path, out_dir: Path):
             "mean_d_dqdv_m_c",
             "var_d_dqdv_m_c",
             "mean_d_dqdv_m_d",
+            "var_dQ_c",
             "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c",
             "mean_d_dqdv_l_c",
@@ -641,6 +943,7 @@ def main(dir_path: Path, out_dir: Path):
             "mean_d_dqdv_m_c",
             "var_d_dqdv_m_c",
             "mean_d_dqdv_m_d",
+            "var_dQ_c",
             "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c",
             "mean_d_dqdv_l_c",
@@ -832,296 +1135,73 @@ def main(dir_path: Path, out_dir: Path):
                 for cn, w_at in scores_sorted[: min(K_SLOWEST_BLACK, len(scores_sorted))]:
                     print(f" - {cn}: ~{w_at:.2f} weeks")
 
-            # ============================================================
-            # ADD: FEATURE SUBPLOTS + GAUSSIAN DISTRIBUTIONS @ IDX
-            # (added only; does not replace your existing figures)
-            # ============================================================
-            x_feat = "weeks"
-            IDX = 25  # you asked for index 25
-
-            # feature columns available in the interpolated dfs
-            interp_feature_cols = [
-                "cap_ocv_dis",
-                "mean_d_dqdv_m_c", "var_d_dqdv_m_c",
-                "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
-                "mean_d_dqdv_h_c", "mean_d_dqdv_l_c",
-                "mean_d_dqdv_h_d", "mean_d_dqdv_l_d",
-                "SOH",
-            ]
-
-            # only keep ones that exist somewhere
-            feat_cols = []
-            for f in interp_feature_cols:
-                for _, df_interp in traj_by_cell_weeks.items():
-                    if f in df_interp.columns:
-                        feat_cols.append(f)
-                        break
-            feat_cols = list(dict.fromkeys(feat_cols))
-
-            closest_set = set(closest_cellnames)
-            farthest_set = set(farthest_cellnames)
-            ref_set = set(REF_NAMES)
-
-            n_feats = len(feat_cols)
-            if n_feats > 0:
-                ncols = 3
-                nrows = math.ceil(n_feats / ncols)
-
-                # ---- (A) feature trajectories vs weeks (subplots) ----
-                fig_feat, axes = plt.subplots(
-                    nrows, ncols,
-                    figsize=(5.5 * ncols, 3.5 * nrows),
-                    sharex=True
-                )
-                axes = np.array(axes).ravel()
-
-                for i_f, feat in enumerate(feat_cols):
-                    axf = axes[i_f]
-                    for cell_name, df_interp in traj_by_cell_weeks.items():
-                        if (x_feat not in df_interp.columns) or (feat not in df_interp.columns):
-                            continue
-
-                        x = df_interp[x_feat].to_numpy(dtype=float)
-                        y = df_interp[feat].to_numpy(dtype=float)
-
-                        if cell_name in ref_set:
-                            color, lw, a = "red", 1.8, 0.95
-                        elif cell_name in closest_set:
-                            color, lw, a = "orange", 1.4, 0.90
-                        elif cell_name in farthest_set:
-                            color, lw, a = "green", 1.4, 0.90
-                        else:
-                            color, lw, a = "blue", 0.9, 0.20
-
-                        axf.plot(y, color=color, linewidth=lw, alpha=a)
-
-                    axf.set_title(feat)
-                    axf.grid(True, alpha=0.3)
-                    axf.set_xlabel("weeks")
-
-                for j in range(n_feats, len(axes)):
-                    axes[j].axis("off")
-
-                legend_handles = [
-                    Line2D([0], [0], color="red", lw=2, label="refs"),
-                    Line2D([0], [0], color="orange", lw=2, label=f"closest {len(closest_set)}"),
-                    Line2D([0], [0], color="green", lw=2, label=f"farthest {len(farthest_set)}"),
-                    Line2D([0], [0], color="blue", lw=2, alpha=0.35, label="other"),
-                ]
-                fig_feat.legend(handles=legend_handles, loc="upper right")
-                fig_feat.suptitle("Interpolated features vs weeks (refs=red, closest=orange, farthest=green)", y=1.02)
-                fig_feat.tight_layout()
-
-                # ---- (B) Gaussian distributions at index IDX (NO trajectory lines) ----
-                fig_dist, axes_dist = plt.subplots(
-                    nrows, ncols,
-                    figsize=(5.5 * ncols, 3.5 * nrows),
-                    sharex=False
-                )
-                axes_dist = np.array(axes_dist).ravel()
-
-                for i_f, feat in enumerate(feat_cols):
-                    axd = axes_dist[i_f]
-
-                    vals_ref, vals_close, vals_far, vals_other = [], [], [], []
-
-                    for cell_name, df_interp in traj_by_cell_weeks.items():
-                        if feat not in df_interp.columns:
-                            continue
-                        yy = df_interp[feat].to_numpy(dtype=float)
-                        if len(yy) <= IDX:
-                            continue
-                        v = float(yy[IDX])
-                        if not np.isfinite(v):
-                            continue
-
-                        if cell_name in ref_set:
-                            vals_ref.append(v)
-                        elif cell_name in closest_set:
-                            vals_close.append(v)
-                        elif cell_name in farthest_set:
-                            vals_far.append(v)
-                        else:
-                            vals_other.append(v)
-
-                    all_vals = np.array(vals_ref + vals_close + vals_far + vals_other, dtype=float)
-                    if all_vals.size < 2:
-                        axd.set_title(f"{feat} (insufficient @ idx={IDX})")
-                        axd.axis("off")
-                        continue
-
-                    x_min = float(np.min(all_vals))
-                    x_max = float(np.max(all_vals))
-                    xgrid = np.linspace(x_min, x_max, 400)
-
-                    def plot_gauss_curve(data, color, label):
-                        if len(data) < 2:
-                            return
-                        mu = float(np.mean(data))
-                        sigma = float(np.std(data, ddof=1))
-                        sigma = max(sigma, 1e-6)
-                        ypdf = gaussian_pdf(xgrid, mu, sigma)
-                        axd.plot(xgrid, ypdf, color=color, linewidth=2.0, label=f"{label} (n={len(data)})")
-
-                    # Gaussian curves only
-                    plot_gauss_curve(vals_other, "blue", "other")
-                    plot_gauss_curve(vals_close, "orange", "closest")
-                    plot_gauss_curve(vals_far, "green", "farthest")
-                    plot_gauss_curve(vals_ref, "red", "refs")
-
-                    axd.set_title(f"{feat} @ idx={IDX}")
-                    axd.set_xlabel("value")
-                    axd.set_ylabel("density")
-                    axd.grid(True, alpha=0.3)
-                    axd.legend(fontsize=8)
-
-                for j in range(n_feats, len(axes_dist)):
-                    axes_dist[j].axis("off")
-
-                fig_dist.suptitle(f"Gaussian feature distributions at interpolated index {IDX}", y=1.02)
-                fig_dist.tight_layout()
-
-    # -----------------------------
-    # NEW: Train surrogate model and run Monte Carlo selection
-    # -----------------------------
-    best_mc = pd.DataFrame()
-    if RUN_MONTE_CARLO and (dist_df is not None) and (not dist_df.empty):
-        if not _HAVE_XGB:
-            print("\n[WARN] xgboost not installed => skipping surrogate + Monte Carlo. (`pip install xgboost`)")
-        else:
-            print("\n" + "=" * 90)
-            print("Training surrogate XGB model: exp_conds -> Wasserstein distance-to-nearest-ref (dist_w)")
-            print("=" * 90)
-            try:
-                model, explainer, X_feat, y, feat_names = train_xgb_no_val_and_shap(
-                    df_exp=df_exp,
-                    dist_df=dist_df,
-                    ref_names=REF_NAMES,
-                    dist_col="dist_w",
-                )
-
-                best_mc = monte_carlo_best_conditions_for_distance(
-                    df_exp=df_exp,
-                    model=model,
-                    ref_names=REF_NAMES,
-                    n_samples=MC_SAMPLES,
-                    top_k=MC_TOPK,
-                )
-
-                print("\n" + "=" * 90)
-                print(f"Top {MC_TOPK} Monte Carlo conditions with smallest predicted dist_w (nearest-ref Wasserstein)")
-                print("=" * 90)
-                print(best_mc.to_string(index=False))
-            except Exception as e:
-                print(f"\n[WARN] Surrogate/Monte Carlo failed: {e}")
-
-    # -----------------------------
-    # Visualize Wasserstein distances (sorted curve + histogram)
-    # -----------------------------
-    if "dist_df" in locals() and dist_df is not None and not dist_df.empty:
-        y = dist_df["dist_w"].to_numpy(float)
-
-        fig_d, ax_d = plt.subplots(figsize=(9, 4))
-        ax_d.plot(np.arange(len(y)), y, linewidth=1.4)
-        ax_d.set_title(
-            f"Wasserstein(assignment) distance to nearest reference | features={FEATURE_COLS}\n"
-            f"signature SOH {SOH_SIG_HI}->{target_soh_features}, n={SIG_NPTS} | scaling={SCALE_METHOD}"
-        )
-        ax_d.set_xlabel("cells (sorted by distance)")
-        ax_d.set_ylabel("distance (mean matched Euclidean cost)")
-        ax_d.grid(True, alpha=0.3)
-
-        n_cl = min(K_CLOSEST_FEATURE, len(dist_df))
-        n_fa = min(K_FARTHEST, len(dist_df))
-        ax_d.scatter(np.arange(n_cl), y[:n_cl], s=35, color="orange", label="closest")
-        ax_d.scatter(np.arange(len(y) - n_fa, len(y)), y[-n_fa:], s=35, color="green", label="farthest")
-        ax_d.legend(loc="best")
-        fig_d.tight_layout()
-
-        fig_h, ax_h = plt.subplots(figsize=(7, 4))
-        ax_h.hist(y, bins=30)
-        ax_h.set_title("Histogram of Wasserstein distances")
-        ax_h.set_xlabel("distance")
-        ax_h.set_ylabel("count")
-        ax_h.grid(True, alpha=0.3)
-        fig_h.tight_layout()
-
-        try:
-            n_show = 3
-            show_cells = []
-            if "closest_cellnames" in locals():
-                show_cells += closest_cellnames[:n_show]
-            if "farthest_cellnames" in locals():
-                show_cells += farthest_cellnames[-n_show:] if farthest_cellnames else []
-
-            if "ref_sigs" in locals() and "exp_sigs" in locals():
-                ref_vis = ref_sigs
-                exp_vis = exp_sigs
-            else:
-                ref_vis = {}
-                exp_vis = {}
-
-            if len(ref_vis) > 0:
-                D = next(iter(ref_vis.values())).shape[1]
-                fig_sig, ax_sig = plt.subplots(figsize=(7, 6))
-
-                if D == 2:
-                    for rn, sig_r in ref_vis.items():
-                        ax_sig.plot(sig_r[:, 0], sig_r[:, 1], marker="o", linewidth=1.5, label=f"ref {rn}")
-                    for cn in show_cells:
-                        if cn not in exp_vis:
-                            continue
-                        row = dist_df[dist_df["cell_name"] == cn].iloc[0]
-                        sig_e = exp_vis[cn]
-                        ax_sig.plot(sig_e[:, 0], sig_e[:, 1], marker="o", linewidth=1.5,
-                                    label=f"{cn} (d={row['dist_w']:.3g})")
-
-                    ax_sig.set_xlabel(FEATURE_COLS[0] + " (scaled)")
-                    ax_sig.set_ylabel(FEATURE_COLS[1] + " (scaled)")
-                    ax_sig.set_title("Signatures in scaled feature space (D=2)")
-                else:
-                    pts_list = []
-                    seq_slices = []
-                    cursor = 0
-
-                    for rn, sig_r in ref_vis.items():
-                        pts_list.append(sig_r)
-                        seq_slices.append((cursor, cursor + sig_r.shape[0], f"ref {rn}"))
-                        cursor += sig_r.shape[0]
-
-                    for cn in show_cells:
-                        if cn not in exp_vis:
-                            continue
-                        sig_e = exp_vis[cn]
-                        row = dist_df[dist_df["cell_name"] == cn].iloc[0]
-                        label = f"{cn} (d={row['dist_w']:.3g})"
-                        pts_list.append(sig_e)
-                        seq_slices.append((cursor, cursor + sig_e.shape[0], label))
-                        cursor += sig_e.shape[0]
-
-                    P = np.concatenate(pts_list, axis=0)
-                    P2 = pca_project_to_2d(P)
-
-                    for a, b, label in seq_slices:
-                        seg = P2[a:b]
-                        ax_sig.plot(seg[:, 0], seg[:, 1], marker="o", linewidth=1.5, label=label)
-
-                    ax_sig.set_xlabel("PC1 (scaled space)")
-                    ax_sig.set_ylabel("PC2 (scaled space)")
-                    ax_sig.set_title(f"Signatures PCA-projected to 2D (original D={D})")
-
-                ax_sig.grid(True, alpha=0.3)
-                ax_sig.legend(loc="best", fontsize=8)
-                fig_sig.tight_layout()
-        except Exception as e:
-            print(f"[WARN] Signature visualization skipped due to error: {e}")
-
     # -----------------------------
     # Overlay SOH trajectories: closest = orange, farthest = green, slowest = black
     # -----------------------------
     closest_cellnames = locals().get("closest_cellnames", [])
     farthest_cellnames = locals().get("farthest_cellnames", [])
     slowest_black_cellnames = locals().get("slowest_black_cellnames", [])
+
+    cap_col = "cap_ocv_dis"  # or "cap_dis"
+    cap_frac = 0.96
+    thr_target = 500_000.0
+
+    all_cells = sorted(traj_by_cell_reg.keys())
+
+    df_all = build_regression_table_cap93_and_var_at_thr(
+        all_cells, traj_by_cell_reg,
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="mean_d_dqdv_m_c"
+    )
+    df_close = build_regression_table_cap93_and_var_at_thr(
+        closest_cellnames, traj_by_cell_reg,
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="mean_d_dqdv_m_c"
+    )
+    df_far = build_regression_table_cap93_and_var_at_thr(
+        farthest_cellnames, traj_by_cell_reg,
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="mean_d_dqdv_m_c"
+    )
+
+    x_cols = ["throughput_at_cap93", "mean_d_dqdv_m_c_at_thr500k"]#var_dQ_c_at_thr500k
+    y_col = "weeks_at_cap93"
+    plot_loglog_scatter_and_polyfit_cycle_only(
+        df_close,
+        x_col="mean_d_dqdv_m_c_at_thr500k",
+        y_col="throughput_at_cap93",
+        name_col="cell_name",
+        fit_substring="cycle",
+        ref_names=REF_NAMES,  # <-- makes refs red
+        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | fit only '*cycle*'",
+    )
+    plot_loglog_scatter_and_polyfit_cycle_only(
+        df_far,
+        x_col="mean_d_dqdv_m_c_at_thr500k",
+        y_col="throughput_at_cap93",
+        name_col="cell_name",
+        fit_substring="cycle",
+        ref_names=REF_NAMES,  # <-- makes refs red
+        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | fit only '*cycle*'",
+    )
+    plot_loglog_scatter_and_polyfit_cycle_only(
+        df_all,
+        x_col="mean_d_dqdv_m_c_at_thr500k",
+        y_col="throughput_at_cap93",
+        name_col="cell_name",
+        fit_substring="cycle",
+        ref_names=REF_NAMES,  # <-- makes refs red
+        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | fit only '*cycle*'",
+    )
+    m_all = fit_linear_regression_numpy(df_all, x_cols=x_cols, y_col=y_col)
+    m_close = fit_linear_regression_numpy(df_close, x_cols=x_cols, y_col=y_col)
+    m_far = fit_linear_regression_numpy(df_far, x_cols=x_cols, y_col=y_col)
+
+    print("\n" + "=" * 90)
+    print("Linear regression (separate models): y=weeks_at_cap93")
+    print(f"cap fraction={cap_frac}, var_dQ_c at throughput={thr_target:.0f}")
+    print(f"Filtered out: cells that don't reach cap{cap_frac * 100:.0f}% OR don't span throughput {thr_target:.0f}")
+    print("=" * 90)
+    print("\n[ALL]", m_all)
+    print("\n[NEAREST]", m_close)
+    print("\n[FARTHEST]", m_far)
 
     added_orange_label = False
     added_orange_label_w = False
@@ -1229,7 +1309,7 @@ def main(dir_path: Path, out_dir: Path):
 
     plt.show()
 
-    return df_exp, df_ref, locals().get("dist_df", pd.DataFrame()), best_mc
+    return df_exp, df_ref, locals().get("dist_df", pd.DataFrame())
 
 
 if __name__ == "__main__":
