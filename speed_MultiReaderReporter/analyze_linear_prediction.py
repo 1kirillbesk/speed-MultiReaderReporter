@@ -735,7 +735,7 @@ def plot_loglog_scatter_and_polyfit_cycle_only(
 
     d = df_points[[name_col, x_col, y_col]].copy()
     d[x_col] = pd.to_numeric(d[x_col], errors="coerce")
-    d[y_col] = pd.to_numeric(d[y_col], errors="coerce")
+    d[y_col] = pd.to_numeric(d[y_col], errors="coerce")/10000
     d = d.dropna(subset=[x_col, y_col, name_col])
 
     # log requires positive values
@@ -786,16 +786,16 @@ def plot_loglog_scatter_and_polyfit_cycle_only(
         )
 
         # polyfit in log10 space (fit only)
-        x_feature = np.log10(d_fit[x_col].to_numpy(float))
-        y_life = np.log10(d_fit[y_col].to_numpy(float))
+        x_feature = np.log(d_fit[x_col].to_numpy(float))
+        y_life = np.log(d_fit[y_col].to_numpy(float))
 
         coefficients = np.polyfit(x_feature, y_life, 1)
         poly_fit = np.poly1d(coefficients)
 
         x_min = float(d[x_col].min())
         x_max = float(d[x_col].max())
-        x_line = np.logspace(np.log10(x_min), np.log10(x_max), 200)
-        y_line = 10 ** (poly_fit(np.log10(x_line)))
+        x_line = np.logspace(np.log(x_min), np.log(x_max), 200)
+        y_line = np.exp((poly_fit(np.log(x_line))))
 
         ax.plot(
             x_line,
@@ -901,7 +901,7 @@ def main(dir_path: Path, out_dir: Path):
 
         t0 = t.iloc[0]
         df["weeks"] = (t - t0).dt.total_seconds() / (7 * 24 * 3600)#var_dQ_c
-        reg_cols = ["weeks", "throughput_cum", "mean_d_dqdv_m_c", "cap_ocv_dis"]  # or "cap_dis"
+        reg_cols = ["weeks", "throughput_cum", "var_dQ_c", "cap_ocv_dis"]  # or "cap_dis"
         if all(c in df.columns for c in reg_cols):
             traj_by_cell_reg[cell_name] = df[reg_cols].copy()
 
@@ -1150,22 +1150,22 @@ def main(dir_path: Path, out_dir: Path):
 
     df_all = build_regression_table_cap93_and_var_at_thr(
         all_cells, traj_by_cell_reg,
-        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="mean_d_dqdv_m_c"
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"
     )
     df_close = build_regression_table_cap93_and_var_at_thr(
         closest_cellnames, traj_by_cell_reg,
-        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="mean_d_dqdv_m_c"
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"
     )
     df_far = build_regression_table_cap93_and_var_at_thr(
         farthest_cellnames, traj_by_cell_reg,
-        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="mean_d_dqdv_m_c"
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"
     )
 
-    x_cols = ["throughput_at_cap93", "mean_d_dqdv_m_c_at_thr500k"]#var_dQ_c_at_thr500k
+    x_cols = ["throughput_at_cap93", "var_dQ_c_at_thr500k"]#var_dQ_c_at_thr500k
     y_col = "weeks_at_cap93"
     plot_loglog_scatter_and_polyfit_cycle_only(
         df_close,
-        x_col="mean_d_dqdv_m_c_at_thr500k",
+        x_col="var_dQ_c_at_thr500k",
         y_col="throughput_at_cap93",
         name_col="cell_name",
         fit_substring="cycle",
@@ -1174,7 +1174,7 @@ def main(dir_path: Path, out_dir: Path):
     )
     plot_loglog_scatter_and_polyfit_cycle_only(
         df_far,
-        x_col="mean_d_dqdv_m_c_at_thr500k",
+        x_col="var_dQ_c_at_thr500k",
         y_col="throughput_at_cap93",
         name_col="cell_name",
         fit_substring="cycle",
@@ -1183,7 +1183,7 @@ def main(dir_path: Path, out_dir: Path):
     )
     plot_loglog_scatter_and_polyfit_cycle_only(
         df_all,
-        x_col="mean_d_dqdv_m_c_at_thr500k",
+        x_col="var_dQ_c_at_thr500k",
         y_col="throughput_at_cap93",
         name_col="cell_name",
         fit_substring="cycle",

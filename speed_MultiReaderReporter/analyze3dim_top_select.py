@@ -378,7 +378,7 @@ def main(dir_path: Path, out_dir: Path):
     rows_ref = []
 
     # Reference cell names
-    REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
+    REF_NAMES = ["SPEED_LW_reference_25", "SPEED_LW_reference_26"]
 
     # CONFIG YOU WANT:
     K_CLOSEST_FEATURE = 25

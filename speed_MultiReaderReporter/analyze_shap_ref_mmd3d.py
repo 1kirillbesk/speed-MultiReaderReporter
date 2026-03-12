@@ -531,7 +531,7 @@ def main(dir_path: Path, out_dir: Path):
     exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
 
     target_soh_features = 0.995
-    target_soh_plot = 0.98
+    target_soh_plot = 0.975
 
     FEATURE_COLS = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c"]
     # FEATURE_COLS = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c", "mean_d_dqdv_m_d"]
@@ -542,7 +542,7 @@ def main(dir_path: Path, out_dir: Path):
     SOH_SIG_LO = target_soh_features
     SIG_NPTS = 5
 
-    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
+    REF_NAMES = ["SPEED_LW_reference_13", "SPEED_LW_reference_14", "SPEED_LW_reference_15"]
 
     K_CLOSEST_FEATURE = 20
     K_FARTHEST = 15

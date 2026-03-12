@@ -316,7 +316,7 @@ def main(dir_path: Path, out_dir: Path):
 
     # You asked for these semantics:
     target_soh_features = 0.995   # used for WASSERSTEIN window (SOH_hi -> this)
-    target_soh_plot = 0.98        # used for plotting interpolation/grid
+    target_soh_plot = 0.975       # used for plotting interpolation/grid
 
     # ---- Choose 2D or 3D by editing this list ----
     # 2D example:
@@ -333,7 +333,7 @@ def main(dir_path: Path, out_dir: Path):
     SIG_NPTS = 5
 
     # Reference cell names
-    REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2"]
+    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
 
     # Selection config
     K_CLOSEST_FEATURE = 20
@@ -814,7 +814,7 @@ def main(dir_path: Path, out_dir: Path):
     )
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
-    ax.set_ylim(bottom=0.8)  # only lower bound
+    ax.set_ylim(bottom=0.7)  # only lower bound
     ax.set_ylim(top=1.1)
     fig.tight_layout()
 
@@ -827,7 +827,7 @@ def main(dir_path: Path, out_dir: Path):
     )
     ax_w.grid(True, alpha=0.3)
     ax_w.legend(loc="best")
-    ax_w.set_ylim(bottom=0.8)  # only lower bound
+    ax_w.set_ylim(bottom=0.7)  # only lower bound
     ax_w.set_ylim(top=1.1)
     fig_w.tight_layout()
 
@@ -840,7 +840,7 @@ def main(dir_path: Path, out_dir: Path):
     )
     ax_t.grid(True, alpha=0.3)
     ax_t.legend(loc="best")
-    ax_t.set_ylim(bottom=0.8)  # only lower bound
+    ax_t.set_ylim(bottom=0.7)  # only lower bound
     ax_t.set_ylim(top=1.1)
     fig_t.tight_layout()
 
