@@ -3,7 +3,7 @@
 input:
   path: "C:/Users/Public/Documents/takedata/Speed/raw_data_csv"     #"C:/Users/Public/Documents/takedata/Speed/raw_data_csv"      # folder OR single file; detector will recurse if it's a folder
   recurse: true
-  name_contains: ["rul_LW", "rul_hk"]
+  name_contains: ["rul_LW"]#rul_hk
 # C:/Users/Public/Documents/example_reporter
 # C:/Users/Public/Documents/takedata/Speed/
 output:
