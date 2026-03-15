@@ -542,7 +542,7 @@ def main(dir_path: Path, out_dir: Path):
     SOH_SIG_LO = target_soh_features
     SIG_NPTS = 5
 
-    REF_NAMES = ["SPEED_LW_reference_13", "SPEED_LW_reference_14", "SPEED_LW_reference_15"]
+    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
 
     K_CLOSEST_FEATURE = 20
     K_FARTHEST = 15
@@ -1193,7 +1193,7 @@ def main(dir_path: Path, out_dir: Path):
     ax.set_title(
         f"SOH trajectories (index-x)\n"
         f"plot interpolation target SOH={target_soh_plot} | Wasserstein signature SOH 1.0->{target_soh_features} | "
-        f"features={FEATURE_COLS} | scaling={SCALE_METHOD}"
+        #f"features={FEATURE_COLS} | scaling={SCALE_METHOD}"
     )
     ax.grid(True, alpha=0.3)
     ax.legend(loc="best")
@@ -1206,7 +1206,7 @@ def main(dir_path: Path, out_dir: Path):
     ax_w.set_title(
         f"SOH trajectories vs weeks\n"
         f"plot interpolation target SOH={target_soh_plot} | Wasserstein signature SOH 1.0->{target_soh_features} | "
-        f"features={FEATURE_COLS} | scaling={SCALE_METHOD}"
+        #f"features={FEATURE_COLS} | scaling={SCALE_METHOD}"
     )
     ax_w.grid(True, alpha=0.3)
     ax_w.legend(loc="best")
@@ -1219,7 +1219,7 @@ def main(dir_path: Path, out_dir: Path):
     ax_t.set_title(
         f"SOH trajectories vs throughput_cum\n"
         f"plot interpolation target SOH={target_soh_plot} | Wasserstein signature SOH 1.0->{target_soh_features} | "
-        f"features={FEATURE_COLS} | scaling={SCALE_METHOD}"
+        #f"features={FEATURE_COLS} | scaling={SCALE_METHOD}"
     )
     ax_t.grid(True, alpha=0.3)
     ax_t.legend(loc="best")
