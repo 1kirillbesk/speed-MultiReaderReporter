@@ -533,7 +533,7 @@ def main(dir_path: Path, out_dir: Path):
     target_soh_features = 0.995
     target_soh_plot = 0.975
 
-    FEATURE_COLS = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c"]
+    FEATURE_COLS = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c","mean_d_dqdv_l_c"]
     # FEATURE_COLS = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c", "mean_d_dqdv_m_d"]
 
     SCALE_METHOD = "robust_iqr"
@@ -1233,6 +1233,8 @@ def main(dir_path: Path, out_dir: Path):
 
 
 if __name__ == "__main__":
-    dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-    out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
+    # dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
+    # out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
+    dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
+    out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
     main(dir_path, out_dir)

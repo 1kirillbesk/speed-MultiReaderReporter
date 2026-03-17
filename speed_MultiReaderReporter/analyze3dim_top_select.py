@@ -143,7 +143,7 @@ def monte_carlo_best_conditions_for_distance(
     model: xgb.XGBRegressor,
     ref_names: list[str],
     raw_conds: list[str] = RAW_CONDS_DEFAULT,
-    n_samples: int = 200,
+    n_samples: int = 500,
     top_k: int = 20,
     random_state: int = 42,
 ) -> pd.DataFrame:
@@ -372,7 +372,7 @@ def main(dir_path: Path, out_dir: Path):
     exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
 
     target_soh_features = 0.995   # feature row selection
-    target_soh_plot = 0.985        # interpolation grid for plotting
+    target_soh_plot = 0.98        # interpolation grid for plotting
 
     rows = []
     rows_ref = []
@@ -1129,6 +1129,8 @@ def main(dir_path: Path, out_dir: Path):
 
 
 if __name__ == "__main__":
-    dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-    out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
+    # dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
+    # out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for
+    dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
+    out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
     main(dir_path, out_dir)
