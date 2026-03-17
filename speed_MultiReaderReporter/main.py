@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import yaml
 import matplotlib.pyplot as plt
+import re
 
 from loaders import csvzip_loader, mat_loader, pkl_loader
 from utils.detect import discover_inputs
@@ -23,7 +24,7 @@ def load_config(cfg_path: Path) -> dict:
 def main():
     # ---------- config ----------
     here = Path(__file__).resolve().parent
-    cfg = load_config(here / "config602.yaml") #config602
+    cfg = load_config(here / "private/config_lw.yaml") #config602
 
     in_path = Path(cfg["input"]["path"]).resolve()
     recurse = bool(cfg["input"].get("recurse", True))
@@ -43,6 +44,17 @@ def main():
         detected = [
             d for d in detected
             if any(n in d.path.name.lower() for n in needles)
+        ]
+
+    cell_names = cfg["input"]["cell_name_contain"]
+    if cell_names:
+        cell_patterns = [
+            re.compile(rf"{re.escape(cell_name)}(?:_|$)", re.IGNORECASE)
+            for cell_name in cell_names
+        ]
+        detected = [
+            d for d in detected
+            if any(p.search(d.path.name) for p in cell_patterns)
         ]
 
     if not detected:

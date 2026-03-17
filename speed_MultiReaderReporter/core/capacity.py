@@ -340,8 +340,6 @@ def extract_features(df,cell,cfg):
             if last_token == "25":
                 choice = 2
 
-
-
     ocv_cha_step = cfg['CU_steps']['ocv_cha'][choice]; ocv_dis_step = cfg['CU_steps']['ocv_dis'][choice]
     capa_cha_step = cfg['CU_steps']['capa_cha'][choice]; capa_dis_step = cfg['CU_steps']['capa_dis'][choice]
     mask_ocv_cha = ((df["step_int"] == ocv_cha_step) & rpt_mask)

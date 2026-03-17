@@ -15,9 +15,7 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('C:/Users/Public/Documents/takedata/Speed/out_lw') / "errors.log"
-#C:/Users/Public/Documents/takedata/Speed/out_lw
-#'C:/Users/Public/Documents/RL_project/out_lw'
+log_path = Path("errors.log")
 logging.basicConfig(
     filename=str(log_path),
     level=logging.INFO,
