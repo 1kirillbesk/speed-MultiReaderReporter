@@ -10,6 +10,9 @@ import pandas as pd
 import numpy as np
 from typing import Tuple
 from scipy.interpolate import CubicSpline
+from utils.combined_cost_search import run_combined_search
+from analyze_linear_prediction import build_regression_table_cap93_and_var_at_thr
+
 
 # 3D plotting
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
@@ -441,7 +444,7 @@ def main(dir_path: Path, out_dir: Path):
         + exp_conds
         + ["cap_ocv_dis"]
         + [
-            "mean_d_dqdv_m_c", "var_d_dqdv_m_c",
+            "mean_d_dqdv_m_c", "var_d_dqdv_m_c","var_dQ_c",
             "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c", "mean_d_dqdv_l_c","mean_d_dqdv_l_c_l",
         ]
@@ -466,6 +469,7 @@ def main(dir_path: Path, out_dir: Path):
     traj_by_cell_weeks: dict[str, pd.DataFrame] = {}
     traj_by_cell_thr: dict[str, pd.DataFrame] = {}
     traj_interp_weeks_by_cell: dict[str, pd.DataFrame] = {}
+    traj_by_cell_reg: dict[str, pd.DataFrame] = {}  # ← add this
 
     cells_below_08 = []
 
@@ -489,6 +493,10 @@ def main(dir_path: Path, out_dir: Path):
 
         t0 = t.iloc[0]
         df["weeks"] = (t - t0).dt.total_seconds() / (7 * 24 * 3600)
+
+        reg_cols = ["weeks", "throughput_cum", "var_dQ_c", "cap_ocv_dis"]
+        if all(c in df.columns for c in reg_cols):
+            traj_by_cell_reg[cell_name] = df[reg_cols].copy()
 
         if any(c not in df.columns for c in exp_conds):
             print(f"[WARN] {cell_name}: missing exp_conds, skipping.")
@@ -679,6 +687,12 @@ def main(dir_path: Path, out_dir: Path):
                 "best_ref": best_ref_names,
             }
         ).sort_values("dist_feat").reset_index(drop=True)
+
+        all_cells = sorted(traj_by_cell_reg.keys())  # you'll also need traj_by_cell_reg — see note below
+        df_all = build_regression_table_cap93_and_var_at_thr(
+            all_cells, traj_by_cell_reg,
+            cap_col="cap_ocv_dis", cap_frac=0.96, throughput_target=500_000.0, var_col="var_dQ_c"
+        )
 
         k1 = min(K_CLOSEST_FEATURE, len(exp_sub))
         closest_idx = np.argsort(dist)[:k1]
@@ -1007,11 +1021,23 @@ def main(dir_path: Path, out_dir: Path):
         #     top_k=10,
         # )
 
-        best = exhaustive_best_conditions_for_distance(
+        # best = exhaustive_best_conditions_for_distance(
+        #     df_exp=df_exp,
+        #     model=model,
+        #     ref_names=REF_NAMES,
+        #     n_samples_per_temp=100,  # 200 per temperature = 600 total
+        #     top_k=8,
+        # )
+        print("df_all columns:", df_all.columns.tolist())
+        print("df_all shape:", df_all.shape)
+        best = run_combined_search(
             df_exp=df_exp,
-            model=model,
+            dist_df=dist_df,
+            df_reg_table=df_all,
             ref_names=REF_NAMES,
-            n_samples_per_temp=100,  # 200 per temperature = 600 total
+            w1=0.5,
+            w2=0.5,
+            n_samples_per_temp=100,
             top_k=8,
         )
 

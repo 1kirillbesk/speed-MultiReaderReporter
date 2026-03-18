@@ -1152,6 +1152,12 @@ def main(dir_path: Path, out_dir: Path):
         all_cells, traj_by_cell_reg,
         cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"
     )
+    from utils.train_xgb_var_dqc import train_xgb_var_dqc_from_conditions
+    result_var_dqc = train_xgb_var_dqc_from_conditions(
+        df_exp=df_exp,
+        df_reg_table=df_all,
+        test_size=0.3,
+    )
     df_close = build_regression_table_cap93_and_var_at_thr(
         closest_cellnames, traj_by_cell_reg,
         cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"

@@ -542,7 +542,7 @@ def main(dir_path: Path, out_dir: Path):
     SOH_SIG_LO = target_soh_features
     SIG_NPTS = 5
 
-    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
+    REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
 
     K_CLOSEST_FEATURE = 20
     K_FARTHEST = 15
@@ -620,6 +620,7 @@ def main(dir_path: Path, out_dir: Path):
             "mean_d_dqdv_l_c",
             "mean_d_dqdv_h_d",
             "mean_d_dqdv_l_d",
+            "throughput_cum"
         ]
         missing = [c for c in interp_cols_weeks if c not in df.columns]
         if missing:
@@ -628,7 +629,7 @@ def main(dir_path: Path, out_dir: Path):
 
         df_filter_weeks = df[interp_cols_weeks].copy()
 
-        interpolated_plot_weeks = load_and_interpolate(df_filter_weeks, target_soh_plot, interpolation_typ="weeks")
+        interpolated_plot_weeks = load_and_interpolate(df_filter_weeks, target_soh_plot, interpolation_typ="throughput")
         if interpolated_plot_weeks is None or interpolated_plot_weeks.empty:
             print(f"[WARN] {cell_name}: interpolation (weeks) failed, skipping.")
             continue
@@ -1233,8 +1234,8 @@ def main(dir_path: Path, out_dir: Path):
 
 
 if __name__ == "__main__":
-    # dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-    # out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
-    dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
-    out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
+    dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
+    out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
+    # dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
+    # out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
     main(dir_path, out_dir)
