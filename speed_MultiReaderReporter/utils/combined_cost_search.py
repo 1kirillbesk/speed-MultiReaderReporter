@@ -150,7 +150,7 @@ def train_model_var_dqc(
         .astype(str).str.strip().str.strip("[]")
         .pipe(pd.to_numeric, errors="coerce")
     )
-    # y = np.log(y.clip(lower=1e-12))  # ← train on log scale
+    y = np.log(np.clip(np.abs(y), 1e-12, None))  # ← train on log scale
     X_feat, feat_names = _make_features(df)
 
     ok = ~y.isna() & np.isfinite(X_feat.to_numpy()).all(axis=1)
@@ -290,7 +290,7 @@ def exhaustive_best_conditions_combined(
     # ── predictions ──────────────────────────────────────────────────────────
     pred_dist = model_dist.predict(X_mc_feat).astype(float)   # minimize
     pred_var  = model_var.predict(X_mc_feat).astype(float)
-    # pred_var  = np.log(np.clip(pred_var, 1e-12, None))  # maximize
+    pred_var = np.log(np.clip(np.abs(pred_var), 1e-12, None))
 
     # ── normalize to [0, 1] across the candidate pool ────────────────────────
     norm_dist = _minmax(pred_dist)          # 0 = best (smallest distance)

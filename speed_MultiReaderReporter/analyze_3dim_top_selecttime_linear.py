@@ -1,4 +1,3 @@
-# speed_MultiReaderReporter/main.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -200,8 +199,6 @@ def monte_carlo_best_conditions_for_distance(
     soc_start = valid_pairs[idx, 0]
     soc_end = valid_pairs[idx, 1]
 
-    # c_rate_chg = rng.uniform(*bounds["c_rate_chg"], n_samples)
-    # c_rate_dchg = rng.uniform(*bounds["c_rate_dchg"], n_samples)
     temp = rng.choice(allowed_temp, size=n_samples, replace=True)
     c_rate_chg = rng.choice(allowed_cur_cha, size=n_samples, replace=True)
     c_rate_dchg = rng.choice(allowed_cur_dis, size=n_samples, replace=True)
@@ -237,7 +234,30 @@ def gaussian_pdf(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
     return (1.0 / (sigma * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
 
 
-def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ: str):
+def load_and_interpolate(
+    df: pd.DataFrame,
+    target_soh: float,
+    interpolation_typ: str,
+    method: str = "cubic",
+    throughput_max: float | None = None,
+):
+    """
+    Interpolate all feature columns on a new reference grid.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Input data containing either 'weeks' or 'throughput_cum' plus 'cap_ocv_dis'.
+    target_soh : float
+        SOH target used to define the dense early part of the new reference grid.
+    interpolation_typ : str
+        'weeks' or 'throughput'
+    method : str
+        'cubic' or 'linear'
+    throughput_max : float | None
+        If interpolation_typ == 'throughput', optionally keep only rows with
+        throughput_cum <= throughput_max before fitting/interpolating.
+    """
     df = df.copy()
     df.iloc[0] = df.iloc[0].fillna(0)
 
@@ -255,6 +275,13 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
 
     df = df.apply(pd.to_numeric, errors="coerce")
 
+    if interpolation_typ == "throughput" and throughput_max is not None:
+        df = df[df["throughput_cum"] <= float(throughput_max)].copy()
+        df = df.reset_index(drop=True)
+
+    if df.empty:
+        return None
+
     if df[ref_name].isna().any() or df["SOH"].isna().any():
         return None
 
@@ -268,7 +295,11 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     reference = df[ref_name].to_numpy(dtype=float)
     target_data = df["SOH"].to_numpy(dtype=float)
 
-    if len(reference) < 3:
+    if len(reference) < 2:
+        return None
+
+    if method == "cubic" and len(reference) < 3:
+        # cubic spline really needs at least 3 points
         return None
 
     feature_cols = [c for c in df.columns if c != ref_name]
@@ -298,16 +329,24 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     interpolated_columns = []
     for j in range(feature.shape[1]):
         yj = feature[:, j]
+
         if np.isnan(yj).any():
             interpolated_columns.append(np.interp(new_ref_points, reference, yj))
             continue
 
-        try:
-            cs = CubicSpline(reference, yj, bc_type="natural", extrapolate=False)
-            y_new = cs(new_ref_points)
+        if method == "linear":
+            y_new = np.interp(new_ref_points, reference, yj)
             interpolated_columns.append(y_new)
-        except Exception:
-            interpolated_columns.append(np.interp(new_ref_points, reference, yj))
+
+        elif method == "cubic":
+            try:
+                cs = CubicSpline(reference, yj, bc_type="natural", extrapolate=False)
+                y_new = cs(new_ref_points)
+                interpolated_columns.append(y_new)
+            except Exception:
+                interpolated_columns.append(np.interp(new_ref_points, reference, yj))
+        else:
+            raise ValueError("method must be 'linear' or 'cubic'")
 
     interpolated_data = np.stack(interpolated_columns, axis=1)
     out = pd.DataFrame(interpolated_data, columns=feature_cols)
@@ -369,6 +408,7 @@ def idx_first_reach_soh(traj: pd.DataFrame, soh_target: float) -> int | None:
         return None
     return int(hit[0])
 
+
 def exhaustive_best_conditions_for_distance(
     df_exp, model, ref_names, raw_conds=RAW_CONDS_DEFAULT,
     n_samples_per_temp=200, top_k=8, random_state=42,
@@ -421,17 +461,22 @@ def exhaustive_best_conditions_for_distance(
 # -----------------------------
 # Main (your 3D feature-space + NEW Monte Carlo surrogate)
 # -----------------------------
-def main(dir_path: Path, out_dir: Path):
+def main(
+    dir_path: Path,
+    out_dir: Path,
+    interp_method: str = "cubic",
+    throughput_max: float | None = 8e7,
+):
     exp_conds = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
 
     target_soh_features = 0.995   # feature row selection
-    target_soh_plot = 0.975        # interpolation grid for plotting
+    target_soh_plot = 0.98       # interpolation grid for plotting
 
     rows = []
     rows_ref = []
 
     # Reference cell names
-    REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2","SPEED_LW_reference_3"]
+    REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
 
     # CONFIG YOU WANT:
     K_CLOSEST_FEATURE = 25
@@ -446,9 +491,9 @@ def main(dir_path: Path, out_dir: Path):
         + exp_conds
         + ["cap_ocv_dis"]
         + [
-            "mean_d_dqdv_m_c", "var_d_dqdv_m_c","var_dQ_c",
+            "mean_d_dqdv_m_c", "var_d_dqdv_m_c", "var_dQ_c",
             "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
-            "mean_d_dqdv_h_c", "mean_d_dqdv_l_c","mean_d_dqdv_l_c_l",
+            "mean_d_dqdv_h_c", "mean_d_dqdv_l_c", "mean_d_dqdv_l_c_l",
         ]
         + ["throughput_cum", "mean_d_dqdv_h_d", "mean_d_dqdv_l_d"]
     )
@@ -471,7 +516,7 @@ def main(dir_path: Path, out_dir: Path):
     traj_by_cell_weeks: dict[str, pd.DataFrame] = {}
     traj_by_cell_thr: dict[str, pd.DataFrame] = {}
     traj_interp_weeks_by_cell: dict[str, pd.DataFrame] = {}
-    traj_by_cell_reg: dict[str, pd.DataFrame] = {}  # ← add this
+    traj_by_cell_reg: dict[str, pd.DataFrame] = {}
 
     cells_below_08 = []
 
@@ -507,10 +552,10 @@ def main(dir_path: Path, out_dir: Path):
 
         interp_cols_weeks = [
             "weeks", "cap_ocv_dis",
-            "mean_d_dqdv_m_c", "var_d_dqdv_m_c","mean_d_dqdv_l_c_l",
+            "mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_l_c_l",
             "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c", "mean_d_dqdv_l_c",
-            "mean_d_dqdv_h_d", "mean_d_dqdv_l_d","throughput_cum"
+            "mean_d_dqdv_h_d", "mean_d_dqdv_l_d", "throughput_cum"
         ]
         missing = [c for c in interp_cols_weeks if c not in df.columns]
         if missing:
@@ -519,7 +564,14 @@ def main(dir_path: Path, out_dir: Path):
 
         df_filter_weeks = df[interp_cols_weeks].copy()
 
-        interpolated_plot_weeks = load_and_interpolate(df_filter_weeks, target_soh_plot, interpolation_typ="throughput") # throughput weeks
+        # TRUE week-based interpolation here
+        interpolated_plot_weeks = load_and_interpolate(
+            df_filter_weeks,
+            target_soh_plot,
+            interpolation_typ="weeks",
+            method=interp_method,
+            throughput_max=throughput_max,
+        )
         if interpolated_plot_weeks is None or interpolated_plot_weeks.empty:
             print(f"[WARN] {cell_name}: interpolation (weeks) failed, skipping.")
             continue
@@ -534,8 +586,8 @@ def main(dir_path: Path, out_dir: Path):
 
         # throughput interpolation
         interp_cols_thr = [
-            "throughput_cum", "cap_ocv_dis","weeks",
-            "mean_d_dqdv_m_c", "var_d_dqdv_m_c","mean_d_dqdv_l_c_l",
+            "throughput_cum", "cap_ocv_dis", "weeks",
+            "mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_l_c_l",
             "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c", "mean_d_dqdv_l_c",
             "mean_d_dqdv_h_d", "mean_d_dqdv_l_d",
@@ -545,7 +597,13 @@ def main(dir_path: Path, out_dir: Path):
             interpolated_plot_thr = None
         else:
             df_filter_thr = df[interp_cols_thr].copy()
-            interpolated_plot_thr = load_and_interpolate(df_filter_thr, target_soh_plot, interpolation_typ="throughput") #throughput weeks
+            interpolated_plot_thr = load_and_interpolate(
+                df_filter_thr,
+                target_soh_plot,
+                interpolation_typ="throughput",
+                method=interp_method,
+                throughput_max=throughput_max,
+            )
 
         if interpolated_plot_thr is not None and not interpolated_plot_thr.empty:
             if "SOH" in interpolated_plot_thr.columns and "throughput_cum" in interpolated_plot_thr.columns:
@@ -585,10 +643,6 @@ def main(dir_path: Path, out_dir: Path):
                 ax_t.plot(traj_by_cell_thr[cell_name]["throughput_cum"], traj_by_cell_thr[cell_name]["SOH"],
                           color="blue", alpha=0.20, linewidth=0.55, label=label_t, zorder=2)
 
-        # feature row at target_soh_features
-        # idx_feat = (interpolated_plot_weeks["SOH"] - target_soh_features).abs().idxmin()
-        # row_feat = interpolated_plot_weeks.loc[idx_feat]
-
         # Interpolate every feature column exactly at target_soh_features
         soh_arr = interpolated_plot_weeks["SOH"].to_numpy(dtype=float)
         feat_at_target = {}
@@ -603,8 +657,6 @@ def main(dir_path: Path, out_dir: Path):
 
         feat_at_target["SOH"] = target_soh_features
         row_feat = pd.Series(feat_at_target)
-
-        # this line stays exactly as before:
 
         combined_row = pd.concat([pd.Series({"cell_name": cell_name}), exp_row, row_feat], axis=0)
 
@@ -690,7 +742,7 @@ def main(dir_path: Path, out_dir: Path):
             }
         ).sort_values("dist_feat").reset_index(drop=True)
 
-        all_cells = sorted(traj_by_cell_reg.keys())  # you'll also need traj_by_cell_reg — see note below
+        all_cells = sorted(traj_by_cell_reg.keys())
         df_all = build_regression_table_cap93_and_var_at_thr(
             all_cells, traj_by_cell_reg,
             cap_col="cap_ocv_dis", cap_frac=0.96, throughput_target=300_000.0, var_col="var_dQ_c"
@@ -932,6 +984,7 @@ def main(dir_path: Path, out_dir: Path):
                 label="closest exp (orange)" if not added_orange_label else None,
                 zorder=4,
             )
+            ax.set_ylim(0.8, 1.1)
             added_orange_label = True
 
             ax_w.plot(
@@ -943,6 +996,7 @@ def main(dir_path: Path, out_dir: Path):
                 label="closest exp (orange)" if not added_orange_label_w else None,
                 zorder=4,
             )
+            ax_w.set_ylim(0.8, 1.1)
             added_orange_label_w = True
 
             traj_t = traj_by_cell_thr.get(cn)
@@ -956,6 +1010,7 @@ def main(dir_path: Path, out_dir: Path):
                     label="closest exp (orange)" if not added_orange_label_t else None,
                     zorder=4,
                 )
+                ax_t.set_ylim(0.8, 1.1)
                 added_orange_label_t = True
 
         added_green_label = False
@@ -975,7 +1030,6 @@ def main(dir_path: Path, out_dir: Path):
                 label="farthest exp (green)" if not added_green_label else None,
                 zorder=5,
             )
-            ax.set_ylim(0.8, 1.1)
             added_green_label = True
 
             ax_w.plot(
@@ -987,7 +1041,6 @@ def main(dir_path: Path, out_dir: Path):
                 label="farthest exp (green)" if not added_green_label_w else None,
                 zorder=5,
             )
-            ax_w.set_ylim(0.8, 1.1)
             added_green_label_w = True
 
             traj_t = traj_by_cell_thr.get(cn)
@@ -1001,7 +1054,6 @@ def main(dir_path: Path, out_dir: Path):
                     label="farthest exp (green)" if not added_green_label_t else None,
                     zorder=5,
                 )
-                ax_t.set_ylim(0.8, 1.1)
                 added_green_label_t = True
 
     # -----------------------------
@@ -1018,21 +1070,6 @@ def main(dir_path: Path, out_dir: Path):
             ref_names=REF_NAMES,
         )
 
-        # best = monte_carlo_best_conditions_for_distance(
-        #     df_exp=df_exp,
-        #     model=model,
-        #     ref_names=REF_NAMES,
-        #     n_samples=500,   # you can increase this
-        #     top_k=10,
-        # )
-
-        # best = exhaustive_best_conditions_for_distance(
-        #     df_exp=df_exp,
-        #     model=model,
-        #     ref_names=REF_NAMES,
-        #     n_samples_per_temp=100,  # 200 per temperature = 600 total
-        #     top_k=8,
-        # )
         print("df_all columns:", df_all.columns.tolist())
         print("df_all shape:", df_all.shape)
         best = run_combined_search(
@@ -1052,7 +1089,7 @@ def main(dir_path: Path, out_dir: Path):
         print(best.to_string(index=False))
     else:
         best = pd.DataFrame()
-    '''
+
     # -----------------------------
     # Overlay trajectories: closest = orange, farthest = green, slowest among closest = black
     # -----------------------------
@@ -1113,7 +1150,7 @@ def main(dir_path: Path, out_dir: Path):
                       label="slowest among closest (black)" if not added_black_label else None, zorder=10)
 
         added_black_label = True
-    '''
+
     # -----------------------------
     # Gaussian distributions of index where SOH first reaches SOH_DIST_TARGET
     # Groups:
@@ -1186,7 +1223,8 @@ def main(dir_path: Path, out_dir: Path):
     ax.set_xlabel("index")
     ax.set_ylabel("SOH")
     ax.set_title(
-        f"SOH trajectories (index-x) (plot interpolation target SOH={target_soh_plot}; "
+        f"SOH trajectories (index-x, method={interp_method}) "
+        f"(plot interpolation target SOH={target_soh_plot}; "
         f"feature comparison at SOH={target_soh_features})"
     )
     ax.grid(True, alpha=0.3)
@@ -1198,7 +1236,8 @@ def main(dir_path: Path, out_dir: Path):
     ax_w.set_xlabel("weeks")
     ax_w.set_ylabel("SOH")
     ax_w.set_title(
-        f"SOH trajectories vs weeks (plot interpolation target SOH={target_soh_plot}; "
+        f"SOH trajectories vs weeks (method={interp_method}) "
+        f"(plot interpolation target SOH={target_soh_plot}; "
         f"feature comparison at SOH={target_soh_features})"
     )
     ax_w.grid(True, alpha=0.3)
@@ -1210,7 +1249,8 @@ def main(dir_path: Path, out_dir: Path):
     ax_t.set_xlabel("throughput_cum")
     ax_t.set_ylabel("SOH")
     ax_t.set_title(
-        f"SOH trajectories vs throughput_cum (plot interpolation target SOH={target_soh_plot}; "
+        f"SOH trajectories vs throughput_cum (method={interp_method}) "
+        f"(plot interpolation target SOH={target_soh_plot}; "
         f"feature comparison at SOH={target_soh_features})"
     )
     ax_t.grid(True, alpha=0.3)
@@ -1220,17 +1260,15 @@ def main(dir_path: Path, out_dir: Path):
     fig_t.tight_layout()
 
     df_exp["mean_soc"] = 0.5 * (
-            pd.to_numeric(df_exp["soc_start"], errors="coerce")
-            + pd.to_numeric(df_exp["soc_end"], errors="coerce")
+        pd.to_numeric(df_exp["soc_start"], errors="coerce")
+        + pd.to_numeric(df_exp["soc_end"], errors="coerce")
     )
 
-    # fewer bins = easier to distinguish
     soc_bins = [0, 33, 66, 100]
     soc_labels = ["0–33", "33–66", "66–100"]
     df_exp["soc_group"] = pd.cut(df_exp["mean_soc"], bins=soc_bins, labels=soc_labels, include_lowest=True)
 
     group_colors = {"0–33": "red", "33–66": "green", "66–100": "blue"}
-    # group_colors = {label: colors_list[i] for i, label in enumerate(soc_labels)}
 
     fig_soc, ax_soc = plt.subplots(figsize=(9, 5))
     fig_soc_w, ax_soc_w = plt.subplots(figsize=(9, 5))
@@ -1300,8 +1338,16 @@ def main(dir_path: Path, out_dir: Path):
 
 
 if __name__ == "__main__":
-    # dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-    # out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for
     dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
     out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
-    main(dir_path, out_dir)
+
+    # choose here:
+    INTERP_METHOD = "linear"   # "cubic" or "linear"
+    THROUGHPUT_MAX = 8e7      # set to None if you do NOT want the limit
+
+    main(
+        dir_path,
+        out_dir,
+        interp_method=INTERP_METHOD,
+        throughput_max=THROUGHPUT_MAX,
+    )
