@@ -484,7 +484,7 @@ def main(
     SOH_SLOW_TARGET = 0.96
 
     # Gaussian distribution target (index where SOH reaches this)
-    SOH_DIST_TARGET = 0.97
+    SOH_DIST_TARGET = 0.96
 
     needed_cols = (
         ["CU_time"]
@@ -492,7 +492,7 @@ def main(
         + ["cap_ocv_dis"]
         + [
             "mean_d_dqdv_m_c", "var_d_dqdv_m_c", "var_dQ_c",
-            "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
+            "mean_d_dqdv_m_d", "var_d_dqdv_m_d","var_d_dqdv_h_c","var_d_dqdv_l_c",
             "mean_d_dqdv_h_c", "mean_d_dqdv_l_c", "mean_d_dqdv_l_c_l",
         ]
         + ["throughput_cum", "mean_d_dqdv_h_d", "mean_d_dqdv_l_d"]
@@ -554,7 +554,7 @@ def main(
             "weeks", "cap_ocv_dis",
             "mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_l_c_l",
             "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
-            "mean_d_dqdv_h_c", "mean_d_dqdv_l_c",
+            "mean_d_dqdv_h_c", "mean_d_dqdv_l_c","var_d_dqdv_h_c","var_d_dqdv_l_c",
             "mean_d_dqdv_h_d", "mean_d_dqdv_l_d", "throughput_cum"
         ]
         missing = [c for c in interp_cols_weeks if c not in df.columns]
@@ -590,7 +590,7 @@ def main(
             "mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_l_c_l",
             "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
             "mean_d_dqdv_h_c", "mean_d_dqdv_l_c",
-            "mean_d_dqdv_h_d", "mean_d_dqdv_l_d",
+            "mean_d_dqdv_h_d", "mean_d_dqdv_l_d","var_d_dqdv_h_c","var_d_dqdv_l_c"
         ]
         missing_thr = [c for c in interp_cols_thr if c not in df.columns]
         if missing_thr:
@@ -771,9 +771,7 @@ def main(
         interp_cols_weeks = [
             "weeks", "cap_ocv_dis",
             "mean_d_dqdv_m_c", "var_d_dqdv_m_c", "mean_d_dqdv_l_c_l",
-            "mean_d_dqdv_m_d", "var_d_dqdv_m_d",
-            "mean_d_dqdv_h_c", "mean_d_dqdv_l_c",
-            "mean_d_dqdv_h_d", "mean_d_dqdv_l_d",
+            "mean_d_dqdv_h_c", "mean_d_dqdv_l_c", "var_d_dqdv_h_c", "var_d_dqdv_l_c",
         ]
 
         x_feat = "weeks"
@@ -1323,6 +1321,133 @@ def main(
     fig_soc.tight_layout()
     fig_soc_w.tight_layout()
     fig_soc_t.tight_layout()
+
+    SOH_STEP_TARGET = 0.96
+    FEATURE_STEP = 16
+
+    _closest_set = set(closest_cellnames) if closest_cellnames else set()
+    _farthest_set = set(farthest_cellnames) if farthest_cellnames else set()
+    _ref_set = set(REF_NAMES)
+
+    # --- Save all interpolated features + step number to folder ---
+    interp_feat_dir = here / "interp_feature"
+    interp_feat_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_rows = []
+
+    for cname, df_interp in traj_interp_weeks_by_cell.items():
+        if "SOH" not in df_interp.columns:
+            continue
+
+        soh_vals = df_interp["SOH"].to_numpy(dtype=float)
+
+        # compute step to SOH_STEP_TARGET (None if never reached)
+        last_soh = soh_vals[~np.isnan(soh_vals)]
+        step_to_target = None
+        if len(last_soh) > 0 and last_soh[-1] <= SOH_STEP_TARGET:
+            hits = np.where(soh_vals <= SOH_STEP_TARGET)[0]
+            if len(hits) > 0 and int(hits[0]) > 0:
+                step_to_target = int(hits[0])
+
+        # save full interpolated trajectory as CSV
+        df_save = df_interp.copy()
+        df_save.insert(0, "cell_name", cname)
+        df_save["step_to_soh_target"] = step_to_target  # same value on every row
+        df_save.to_csv(interp_feat_dir / f"{cname}.csv", index=False)
+
+        # one summary row per cell
+        row = {"cell_name": cname, "step_to_soh_target": step_to_target}
+        # store every feature at FEATURE_STEP if available
+        for col in df_interp.columns:
+            arr = df_interp[col].to_numpy(dtype=float)
+            if len(arr) > FEATURE_STEP:
+                row[f"{col}_at_step{FEATURE_STEP}"] = arr[FEATURE_STEP]
+            else:
+                row[f"{col}_at_step{FEATURE_STEP}"] = np.nan
+        summary_rows.append(row)
+
+    df_summary = pd.DataFrame(summary_rows)
+    df_summary.to_csv(interp_feat_dir / "_summary_all_cells.csv", index=False)
+    print(f"\nSaved {len(summary_rows)} cell files + summary to {interp_feat_dir}")
+
+    # --- Scatter plot (farthest excluded) ---
+    log_feat_arr = []
+    log_steps_arr = []
+    color_arr = []
+
+    for cname, df_interp in traj_interp_weeks_by_cell.items():
+        if cname in _farthest_set:
+            continue
+        if "SOH" not in df_interp.columns or "mean_d_dqdv_m_c" not in df_interp.columns:
+            continue
+
+        soh_vals = df_interp["SOH"].to_numpy(dtype=float)
+
+        last_soh = soh_vals[~np.isnan(soh_vals)]
+        if len(last_soh) == 0 or last_soh[-1] > SOH_STEP_TARGET:
+            continue
+
+        hits = np.where(soh_vals <= SOH_STEP_TARGET)[0]
+        if len(hits) == 0:
+            continue
+        n_steps = int(hits[0])
+        if n_steps <= 0:
+            continue
+
+        feat_vals = df_interp["mean_d_dqdv_m_c"].to_numpy(dtype=float)
+        if len(feat_vals) <= FEATURE_STEP:
+            continue
+        fv = feat_vals[FEATURE_STEP]
+        if not np.isfinite(fv) or fv == 0.0:
+            continue
+
+        log_feat_arr.append(np.log(np.abs(fv)))
+        log_steps_arr.append(np.log(n_steps))
+
+        if cname in _ref_set:
+            color_arr.append("red")
+        elif cname in _closest_set:
+            color_arr.append("orange")
+        else:
+            color_arr.append("blue")
+
+    log_feat_arr = np.array(log_feat_arr, dtype=float)
+    log_steps_arr = np.array(log_steps_arr, dtype=float)
+
+    fig_loglog, ax_loglog = plt.subplots(figsize=(9, 6))
+
+    if len(log_feat_arr) >= 2:
+        _lmap = {"blue": "other", "orange": "closest", "red": "refs"}
+        for cv in ["blue", "orange", "red"]:
+            m = np.array([c == cv for c in color_arr])
+            if not m.any():
+                continue
+            ax_loglog.scatter(
+                log_feat_arr[m], log_steps_arr[m],
+                c=cv, s=45, alpha=0.75, edgecolors="k", linewidths=0.4,
+                label=_lmap[cv],
+            )
+
+        coeffs = np.polyfit(log_feat_arr, log_steps_arr, 1)
+        xfit = np.linspace(log_feat_arr.min(), log_feat_arr.max(), 200)
+        ax_loglog.plot(xfit, np.polyval(coeffs, xfit), "k--", lw=1.5,
+                       label=f"fit: slope={coeffs[0]:.3f}, intercept={coeffs[1]:.3f}")
+
+        r = np.corrcoef(log_feat_arr, log_steps_arr)[0, 1]
+        ax_loglog.set_title(
+            f"log|mean_d_dqdv_m_c| @ step {FEATURE_STEP}  vs  "
+            f"log(steps to SOH\u2264{SOH_STEP_TARGET})\n"
+            f"n={len(log_feat_arr)}, r={r:.3f}  "
+            f"(farthest excluded, cells with last SOH>{SOH_STEP_TARGET} excluded)"
+        )
+    else:
+        ax_loglog.set_title("Insufficient data for log\u2013log scatter")
+
+    ax_loglog.set_xlabel(f"log( |mean_d_dqdv_m_c| )  at interpolated step {FEATURE_STEP}")
+    ax_loglog.set_ylabel(f"log( steps to SOH \u2264 {SOH_STEP_TARGET} )")
+    ax_loglog.grid(True, alpha=0.3)
+    ax_loglog.legend(loc="best")
+    fig_loglog.tight_layout()
 
     plt.show()
 
