@@ -1,4 +1,3 @@
-# speed_MultiReaderReporter/main.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -57,7 +56,7 @@ def make_features_from_raw(
 
     - Coerces to numeric
     - Creates soc, dod
-    - Replaces c_rate_chg==15 with 1.5 (your encoding fix)
+    - Replaces c_rate_chg==15 with 1.5
     - Optionally drops soc_start/soc_end
     Returns: (X_features, feature_names)
     """
@@ -129,7 +128,6 @@ def train_xgb_no_val_and_shap(
 
     explainer = None
     if _HAVE_SHAP:
-        # KernelExplainer works for any model, but can be slow.
         explainer = shap.KernelExplainer(lambda a: model.predict(np.asarray(a)), X_feat)
         shap_values = explainer.shap_values(X_feat)
 
@@ -137,12 +135,10 @@ def train_xgb_no_val_and_shap(
         shap.summary_plot(shap_values, X_feat, show=False, max_display=shap_max_display)
         plt.title(f"SHAP summary — target: {dist_col}")
         plt.tight_layout()
-        # plt.show()
 
         shap.summary_plot(shap_values, X_feat, plot_type="bar", show=False, max_display=shap_max_display)
         plt.title(f"SHAP importance — target: {dist_col}")
         plt.tight_layout()
-        # plt.show()
 
     return model, explainer, X_feat, y, feat_names
 
@@ -160,19 +156,6 @@ def monte_carlo_best_conditions_for_distance(
     """
     Monte Carlo search over RAW conditions (with your discrete constraints),
     engineer SAME features as training, predict, and return smallest top_k.
-
-    Discrete:
-      - temp in {15,25,40}
-      - soc_start in {0..60 step 10}
-      - soc_end in {20..100 step 10}
-      - c_rate_chg in {0.5..1.5 step 0.1}
-      - c_rate_dchg in {0.5..3.0 step 0.1}
-    Constraints:
-      - soc_end > soc_start
-      - soc_end - soc_start > 10  (=> at least 20 with 10-step grids)
-
-    Note: This only optimizes predicted *distance-to-reference* (your dist_w),
-    not lifetime/aging speed.
     """
     rng = np.random.default_rng(random_state)
 
@@ -184,10 +167,10 @@ def monte_carlo_best_conditions_for_distance(
         df_train.loc[df_train["c_rate_chg"] == 15, "c_rate_chg"] = 1.5
 
     allowed_temp = np.array([15.0, 25.0, 40.0], dtype=float)
-    allowed_soc_start = np.arange(0, 61, 10, dtype=float)  # 0..60
-    allowed_soc_end = np.arange(20, 101, 10, dtype=float)  # 20..100
-    allowed_cur_cha = np.arange(0.5, 1.6, 0.1, dtype=float)  # 0.5..1.5
-    allowed_cur_dis = np.arange(0.5, 3.1, 0.1, dtype=float)  # 0.5..3.0
+    allowed_soc_start = np.arange(0, 61, 10, dtype=float)
+    allowed_soc_end = np.arange(20, 101, 10, dtype=float)
+    allowed_cur_cha = np.arange(0.5, 1.6, 0.1, dtype=float)
+    allowed_cur_dis = np.arange(0.5, 3.1, 0.1, dtype=float)
 
     valid_pairs = np.array(
         [(s0, s1) for s0 in allowed_soc_start for s1 in allowed_soc_end if (s1 - s0) > 10],
@@ -220,7 +203,7 @@ def monte_carlo_best_conditions_for_distance(
     out = X_mc_raw.copy()
     out["soc"] = X_mc_feat["soc"].to_numpy()
     out["dod"] = X_mc_feat["dod"].to_numpy()
-    out["pred_dist_w"] = pred  # predicted distance-to-nearest-ref (dist_w)
+    out["pred_dist_w"] = pred
 
     best = out.nsmallest(top_k, "pred_dist_w").reset_index(drop=True)
     return best
@@ -238,7 +221,6 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     df = df.copy()
     df.iloc[0] = df.iloc[0].fillna(0)
 
-    # compute SOH
     df["SOH"] = df["cap_ocv_dis"] / df["cap_ocv_dis"].iloc[0]
 
     if interpolation_typ == "weeks":
@@ -248,21 +230,17 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     else:
         raise ValueError("interpolation_typ must be 'weeks' or 'throughput'")
 
-    # keep first row + rows where ref != 0
     mask = (df.index == 0) | (df[ref_name] != 0)
     df = df.loc[mask].reset_index(drop=True)
 
-    # coerce to numeric (safe)
     df = df.apply(pd.to_numeric, errors="coerce")
 
-    # abort if key columns are missing/invalid
     if df[ref_name].isna().any() or df["SOH"].isna().any():
         return None
 
     reference = df[ref_name].to_numpy(dtype=float)
     target_data = df["SOH"].to_numpy(dtype=float)
 
-    # need strictly increasing x for CubicSpline
     keep = ~pd.Series(reference).duplicated(keep="first")
     df = df.loc[keep.values].reset_index(drop=True)
 
@@ -272,14 +250,11 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
     if len(reference) < 3:
         return None
 
-    # interpolate EVERYTHING except ref (so SOH will be included)
     feature_cols = [c for c in df.columns if c != ref_name]
     feature = df[feature_cols].to_numpy(dtype=float)
 
-    # find reference location where SOH reaches target_soh (SOH decreases => reverse)
     interpolated_ref = np.interp(target_soh, target_data[::-1], reference[::-1])
 
-    # 15 points up to target, then continue with same spacing
     new_ref_points_cut = np.linspace(0.0, float(interpolated_ref), 15)
     spacing = float(np.mean(np.diff(new_ref_points_cut))) if len(new_ref_points_cut) > 1 else 0.0
     if spacing <= 0:
@@ -299,7 +274,6 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
 
     new_ref_points = np.concatenate([new_ref_points_cut, np.array(remaining_points, dtype=float)])
 
-    # CubicSpline interpolation per column (fallback to linear if NaNs / errors)
     interpolated_columns = []
     for j in range(feature.shape[1]):
         yj = feature[:, j]
@@ -326,12 +300,10 @@ def load_and_interpolate(df: pd.DataFrame, target_soh: float, interpolation_typ:
 
 
 def exp_row_from_first_line(df: pd.DataFrame, exp_conds: list[str]) -> pd.Series:
-    """Return exp condition values from row 0 as a Series."""
     return df.loc[0, exp_conds]
 
 
 def weeks_to_reach_soh(traj_weeks: pd.DataFrame, soh_target: float) -> float | None:
-    """Return interpolated weeks when SOH reaches soh_target, else None."""
     if traj_weeks is None or traj_weeks.empty:
         return None
     if "weeks" not in traj_weeks.columns or "SOH" not in traj_weeks.columns:
@@ -349,7 +321,7 @@ def weeks_to_reach_soh(traj_weeks: pd.DataFrame, soh_target: float) -> float | N
     if np.nanmin(s) > soh_target:
         return None
 
-    idx = np.argsort(s)  # SOH ascending
+    idx = np.argsort(s)
     s_sorted = s[idx]
     w_sorted = w[idx]
 
@@ -373,12 +345,6 @@ def feature_signature_nd(
     n_points: int,
     time_col: str = "weeks",
 ) -> np.ndarray | None:
-    """
-    Robust ND signature builder:
-    - finds t1 at SOH=soh_lo
-    - samples ts uniformly in [t0, t1]
-    - interpolates each feature vs time using only non-NaN points
-    """
     if traj is None or traj.empty:
         return None
     needed = {time_col, "SOH"} | set(feature_cols)
@@ -458,10 +424,6 @@ def feature_signature_nd(
 
 
 def wasserstein_assignment(sig_a: np.ndarray, sig_b: np.ndarray) -> float:
-    """
-    Mean matched Euclidean cost between two equal-weight point clouds via Hungarian assignment.
-    Works for ANY dimension D (2D, 3D, ...).
-    """
     if sig_a is None or sig_b is None:
         return float("nan")
     k = min(sig_a.shape[0], sig_b.shape[0])
@@ -517,7 +479,7 @@ def pca_project_to_2d(points: np.ndarray) -> np.ndarray:
 
 
 # ============================================================
-# NEW helper: Gaussian pdf for distributions
+# Helpers
 # ============================================================
 def gaussian_pdf(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
     sigma = float(max(sigma, 1e-12))
@@ -527,11 +489,6 @@ def gaussian_pdf(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
 def interpolate_y_at_x(
     x: np.ndarray, y: np.ndarray, x_target: float
 ) -> float | None:
-    """
-    Linear interpolation of y(x) at x_target.
-    Requires x to span x_target and have at least 2 unique points.
-    Returns None if not possible.
-    """
     ok = np.isfinite(x) & np.isfinite(y)
     x = x[ok]
     y = y[ok]
@@ -542,7 +499,6 @@ def interpolate_y_at_x(
     x = x[order]
     y = y[order]
 
-    # remove duplicated x (keep first)
     keep = ~pd.Series(x).duplicated(keep="first").to_numpy()
     x = x[keep]
     y = y[keep]
@@ -558,17 +514,11 @@ def interpolate_y_at_x(
 def cap_fraction_crossing_time_and_throughput(
     df_traj: pd.DataFrame,
     *,
-    cap_col: str = "cap_ocv_dis",   # change to "cap_dis" if that's your real column
+    cap_col: str = "cap_ocv_dis",
     time_col: str = "weeks",
     thr_col: str = "throughput_cum",
     frac: float = 0.93,
 ) -> tuple[float, float] | None:
-    """
-    Find time when cap reaches frac*cap0 (first crossing), and throughput at that time.
-    Uses linear interpolation between the bracketing samples in TIME.
-    Returns (weeks_at_cap_frac, throughput_at_cap_frac).
-    Drops cells that never reach the fraction.
-    """
     needed = {cap_col, time_col, thr_col}
     if not needed.issubset(df_traj.columns):
         return None
@@ -582,7 +532,6 @@ def cap_fraction_crossing_time_and_throughput(
     cap = d[cap_col].to_numpy(float)
     thr = d[thr_col].to_numpy(float)
 
-    # sort by time
     order = np.argsort(t)
     t, cap, thr = t[order], cap[order], thr[order]
 
@@ -591,11 +540,9 @@ def cap_fraction_crossing_time_and_throughput(
         return None
     target = frac * cap0
 
-    # FILTER: must actually reach target
     if np.nanmin(cap) > target:
         return None
 
-    # first index where cap <= target
     idx = np.where(cap <= target)[0]
     if len(idx) == 0:
         return None
@@ -629,29 +576,19 @@ def build_regression_table_cap93_and_var_at_thr(
     cell_names: list[str],
     traj_dict: dict[str, pd.DataFrame],
     *,
-    cap_col: str = "cap_ocv_dis",   # change if needed
+    cap_col: str = "cap_ocv_dis",
     time_col: str = "weeks",
     thr_col: str = "throughput_cum",
     var_col: str = "var_dQ_c",
-    cap_frac: float = 0.93,
+    cap_frac: float = 0.95,
     throughput_target: float = 500_000.0,
 ) -> pd.DataFrame:
-    """
-    Per cell:
-      y  = weeks_at_cap93
-      x1 = throughput_at_cap93
-      x2 = var_dQ_c_at_throughput_500k (interpolated in throughput domain)
-    Filters out cells that:
-      - do not reach cap_frac
-      - do not span throughput_target (can't interpolate var_dQ_c at 500k)
-    """
     rows = []
     for cn in cell_names:
         df = traj_dict.get(cn)
         if df is None:
             continue
 
-        # 1) weeks + throughput at cap93 crossing
         cap_out = cap_fraction_crossing_time_and_throughput(
             df,
             cap_col=cap_col,
@@ -663,7 +600,6 @@ def build_regression_table_cap93_and_var_at_thr(
             continue
         weeks_cap, thr_cap = cap_out
 
-        # 2) var_dQ_c at throughput ~500k (exact interp at 500k)
         if not {thr_col, var_col}.issubset(df.columns):
             continue
         thr = pd.to_numeric(df[thr_col], errors="coerce").to_numpy(float)
@@ -717,6 +653,90 @@ def fit_linear_regression_numpy(
         "r2": float(r2),
     }
 
+
+def predict_linear_regression_numpy(
+    df_pred: pd.DataFrame,
+    model: dict,
+    x_cols: list[str],
+) -> pd.DataFrame:
+    if not model.get("ok", False):
+        return pd.DataFrame()
+
+    d = df_pred.copy()
+    for c in x_cols:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+
+    d = d.dropna(subset=x_cols).copy()
+    if d.empty:
+        return d
+
+    y_hat = np.full(len(d), float(model["intercept"]))
+    for c in x_cols:
+        y_hat += float(model["coef"][c]) * d[c].to_numpy(float)
+
+    d["y_pred"] = y_hat
+    return d
+
+
+def mape_from_cols(df: pd.DataFrame, y_true_col: str, y_pred_col: str) -> float | None:
+    if df is None or df.empty:
+        return None
+
+    d = df[[y_true_col, y_pred_col]].copy()
+    d[y_true_col] = pd.to_numeric(d[y_true_col], errors="coerce")
+    d[y_pred_col] = pd.to_numeric(d[y_pred_col], errors="coerce")
+    d = d.dropna()
+
+    d = d[d[y_true_col] != 0]
+    if d.empty:
+        return None
+
+    return float((np.abs((d[y_true_col] - d[y_pred_col]) / d[y_true_col])).mean() * 100.0)
+
+
+def split_train_test_by_refs(
+    df_in: pd.DataFrame,
+    ref_names: list[str],
+    name_col: str = "cell_name",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df_in is None or df_in.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    ref_set = set(ref_names)
+    is_ref = df_in[name_col].astype(str).isin(ref_set)
+
+    df_train = df_in.loc[~is_ref].copy()
+    df_test = df_in.loc[is_ref].copy()
+    return df_train, df_test
+
+
+def plot_ref_pred_vs_actual(df_pred: pd.DataFrame, y_col: str, title: str):
+    if df_pred is None or df_pred.empty:
+        print(f"[WARN] {title}: no ref predictions to plot.")
+        return None
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    x = pd.to_numeric(df_pred[y_col], errors="coerce").to_numpy(float)
+    y = pd.to_numeric(df_pred["y_pred"], errors="coerce").to_numpy(float)
+
+    ok = np.isfinite(x) & np.isfinite(y)
+    x = x[ok]
+    y = y[ok]
+    if len(x) == 0:
+        return None
+
+    ax.scatter(x, y, s=50)
+    mn = min(x.min(), y.min())
+    mx = max(x.max(), y.max())
+    ax.plot([mn, mx], [mn, mx], "--")
+    ax.set_xlabel("actual")
+    ax.set_ylabel("predicted")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_loglog_scatter_and_polyfit_cycle_only(
     df_points: pd.DataFrame,
     *,
@@ -735,25 +755,28 @@ def plot_loglog_scatter_and_polyfit_cycle_only(
 
     d = df_points[[name_col, x_col, y_col]].copy()
     d[x_col] = pd.to_numeric(d[x_col], errors="coerce")
-    d[y_col] = pd.to_numeric(d[y_col], errors="coerce")/10000
+    d[y_col] = pd.to_numeric(d[y_col], errors="coerce")
+
+    # only rescale throughput for nicer plotting
+    if y_col == "throughput_at_cap93":
+        d[y_col] = d[y_col] / 10000.0
+
     d = d.dropna(subset=[x_col, y_col, name_col])
 
-    # log requires positive values
     d = d[(d[x_col] > 0) & (d[y_col] > 0)]
     if d.empty:
         print("[WARN] No positive finite points for log-log plot.")
         return None
 
     is_ref = d[name_col].astype(str).isin(ref_set)
-    is_fit = d[name_col].astype(str).str.contains(fit_substring, case=False, na=False)
+    is_fit_candidate = d[name_col].astype(str).str.contains(fit_substring, case=False, na=False)
 
     d_ref = d[is_ref].copy()
-    d_fit = d[is_fit].copy()
+    d_fit = d[is_fit_candidate & ~is_ref].copy()   # fit only NON-ref cycle cells
     d_other = d[~is_ref].copy()
 
     fig, ax = plt.subplots(figsize=(7.5, 5))
 
-    # scatter all non-ref cells (blue-ish default)
     ax.scatter(
         d_other[x_col].to_numpy(float),
         d_other[y_col].to_numpy(float),
@@ -762,7 +785,6 @@ def plot_loglog_scatter_and_polyfit_cycle_only(
         label="all (non-ref)",
     )
 
-    # reference cells in red
     if not d_ref.empty:
         ax.scatter(
             d_ref[x_col].to_numpy(float),
@@ -774,42 +796,40 @@ def plot_loglog_scatter_and_polyfit_cycle_only(
             zorder=5,
         )
 
-    # highlight fit subset (cycle) (over non-ref)
     if not d_fit.empty:
         ax.scatter(
             d_fit[x_col].to_numpy(float),
             d_fit[y_col].to_numpy(float),
             s=40,
             alpha=0.9,
-            label=f"fit cells: '*{fit_substring}*'",
+            label=f"fit cells: '*{fit_substring}*' (non-ref only)",
             zorder=6,
         )
 
-        # polyfit in log10 space (fit only)
         x_feature = np.log(d_fit[x_col].to_numpy(float))
         y_life = np.log(d_fit[y_col].to_numpy(float))
 
         coefficients = np.polyfit(x_feature, y_life, 1)
         poly_fit = np.poly1d(coefficients)
 
-        x_min = float(d[x_col].min())
-        x_max = float(d[x_col].max())
-        x_line = np.logspace(np.log(x_min), np.log(x_max), 200)
-        y_line = np.exp((poly_fit(np.log(x_line))))
+        x_min = float(d_fit[x_col].min())
+        x_max = float(d_fit[x_col].max())
+        x_line = np.geomspace(x_min, x_max, 200)
+        y_line = np.exp(poly_fit(np.log(x_line)))
 
         ax.plot(
             x_line,
             y_line,
             linewidth=2.0,
-            label=f"fit: log10(y)=a*log10(x)+b (a={coefficients[0]:.3g})",
+            label=f"fit: log(y)=a*log(x)+b (a={coefficients[0]:.3g})",
             zorder=7,
         )
 
         print("\n[polyfit log-log]")
-        print(f"coefficients (a,b) for log10(y)=a*log10(x)+b: {coefficients}")
+        print(f"coefficients (a,b) for log(y)=a*log(x)+b: {coefficients}")
         print(f"poly1d: {poly_fit}")
     else:
-        print(f"[WARN] No cells matched substring '{fit_substring}' => no fit line drawn.")
+        print(f"[WARN] No NON-ref cells matched substring '{fit_substring}' => no fit line drawn.")
 
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -821,6 +841,74 @@ def plot_loglog_scatter_and_polyfit_cycle_only(
     fig.tight_layout()
     return fig, ax
 
+def loglog_fit_and_mape(
+    df_points: pd.DataFrame,
+    *,
+    x_col: str,
+    y_col: str,
+    name_col: str = "cell_name",
+    fit_substring: str = "cycle",
+    ref_names: list[str] | None = None,
+):
+    """
+    Fit log(y)=a log(x)+b on NON-ref cells containing fit_substring.
+    Compute predictions for refs.
+    Return coefficients + MAPE.
+    """
+
+    ref_set = set(ref_names or [])
+
+    d = df_points[[name_col, x_col, y_col]].copy()
+    d[x_col] = pd.to_numeric(d[x_col], errors="coerce")
+    d[y_col] = pd.to_numeric(d[y_col], errors="coerce")
+    d = d.dropna()
+
+    d = d[(d[x_col] > 0) & (d[y_col] > 0)]
+
+    is_ref = d[name_col].astype(str).isin(ref_set)
+    is_cycle = d[name_col].astype(str).str.contains(fit_substring, case=False, na=False)
+
+    df_fit = d[is_cycle & ~is_ref]
+    df_test = d[is_ref]
+
+    if len(df_fit) < 2:
+        print("[WARN] not enough cells for log-log fit")
+        return None
+
+    # log-log regression
+    x_fit = np.log(df_fit[x_col].to_numpy(float))
+    y_fit = np.log(df_fit[y_col].to_numpy(float))
+
+    a, b = np.polyfit(x_fit, y_fit, 1)
+
+    # predictions for refs
+    x_test = np.log(df_test[x_col].to_numpy(float))
+    y_pred_log = a * x_test + b
+    y_pred = np.exp(y_pred_log)
+
+    df_test = df_test.copy()
+    df_test["y_pred"] = y_pred
+
+    # MAPE
+    mape = (
+        np.abs((df_test[y_col] - df_test["y_pred"]) / df_test[y_col])
+        .mean()
+        * 100
+    )
+
+    print("\nLOG-LOG MODEL")
+    print(f"log(y) = {a:.4f} log(x) + {b:.4f}")
+    print(f"MAPE on references = {mape:.3f} %")
+
+    print("\nreference predictions:")
+    print(df_test[[name_col, y_col, "y_pred"]])
+
+    return {
+        "a": float(a),
+        "b": float(b),
+        "mape": float(mape),
+        "df_pred": df_test,
+    }
 # ============================================================
 # Main
 # ============================================================
@@ -831,7 +919,6 @@ def main(dir_path: Path, out_dir: Path):
     target_soh_plot = 0.98
 
     FEATURE_COLS = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c"]
-    # FEATURE_COLS = ["mean_d_dqdv_m_c", "mean_d_dqdv_h_c", "mean_d_dqdv_m_d"]
 
     SCALE_METHOD = "robust_iqr"
 
@@ -900,8 +987,9 @@ def main(dir_path: Path, out_dir: Path):
             continue
 
         t0 = t.iloc[0]
-        df["weeks"] = (t - t0).dt.total_seconds() / (7 * 24 * 3600)#var_dQ_c
-        reg_cols = ["weeks", "throughput_cum", "var_dQ_c", "cap_ocv_dis"]  # or "cap_dis"
+        df["weeks"] = (t - t0).dt.total_seconds() / (7 * 24 * 3600)
+
+        reg_cols = ["weeks", "throughput_cum", "var_dQ_c", "cap_ocv_dis"]
         if all(c in df.columns for c in reg_cols):
             traj_by_cell_reg[cell_name] = df[reg_cols].copy()
 
@@ -1135,22 +1223,24 @@ def main(dir_path: Path, out_dir: Path):
                 for cn, w_at in scores_sorted[: min(K_SLOWEST_BLACK, len(scores_sorted))]:
                     print(f" - {cn}: ~{w_at:.2f} weeks")
 
-    # -----------------------------
-    # Overlay SOH trajectories: closest = orange, farthest = green, slowest = black
-    # -----------------------------
     closest_cellnames = locals().get("closest_cellnames", [])
     farthest_cellnames = locals().get("farthest_cellnames", [])
     slowest_black_cellnames = locals().get("slowest_black_cellnames", [])
 
-    cap_col = "cap_ocv_dis"  # or "cap_dis"
+    cap_col = "cap_ocv_dis"
     cap_frac = 0.96
     thr_target = 500_000.0
 
     all_cells = sorted(traj_by_cell_reg.keys())
+    ref_cellnames = [rn for rn in REF_NAMES if rn in traj_by_cell_reg]
+
+    all_cells_with_ref = sorted(set(all_cells) | set(ref_cellnames))
+    close_cells_with_ref = sorted(set(closest_cellnames) | set(ref_cellnames))
+    far_cells_with_ref = sorted(set(farthest_cellnames) | set(ref_cellnames))
 
     df_all = build_regression_table_cap93_and_var_at_thr(
-        all_cells, traj_by_cell_reg,
-        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"
+        all_cells_with_ref, traj_by_cell_reg,
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target, var_col="var_dQ_c"
     )
     from utils.train_xgb_var_dqc import train_xgb_var_dqc_from_conditions
     result_var_dqc = train_xgb_var_dqc_from_conditions(
@@ -1158,25 +1248,31 @@ def main(dir_path: Path, out_dir: Path):
         df_reg_table=df_all,
         test_size=0.3,
     )
+
     df_close = build_regression_table_cap93_and_var_at_thr(
-        closest_cellnames, traj_by_cell_reg,
-        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"
+        close_cells_with_ref, traj_by_cell_reg,
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target, var_col="var_dQ_c"
     )
     df_far = build_regression_table_cap93_and_var_at_thr(
-        farthest_cellnames, traj_by_cell_reg,
-        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target,var_col="var_dQ_c"
+        far_cells_with_ref, traj_by_cell_reg,
+        cap_col=cap_col, cap_frac=cap_frac, throughput_target=thr_target, var_col="var_dQ_c"
     )
 
-    x_cols = ["throughput_at_cap93", "var_dQ_c_at_thr500k"]#var_dQ_c_at_thr500k
+    df_all_train, df_all_test = split_train_test_by_refs(df_all, REF_NAMES)
+    df_close_train, df_close_test = split_train_test_by_refs(df_close, REF_NAMES)
+    df_far_train, df_far_test = split_train_test_by_refs(df_far, REF_NAMES)
+
+    x_cols = ["throughput_at_cap93", "var_dQ_c_at_thr500k"]
     y_col = "weeks_at_cap93"
+
     plot_loglog_scatter_and_polyfit_cycle_only(
         df_close,
         x_col="var_dQ_c_at_thr500k",
         y_col="throughput_at_cap93",
         name_col="cell_name",
         fit_substring="cycle",
-        ref_names=REF_NAMES,  # <-- makes refs red
-        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | fit only '*cycle*'",
+        ref_names=REF_NAMES,
+        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | CLOSE + refs | fit only non-ref '*cycle*'",
     )
     plot_loglog_scatter_and_polyfit_cycle_only(
         df_far,
@@ -1184,8 +1280,8 @@ def main(dir_path: Path, out_dir: Path):
         y_col="throughput_at_cap93",
         name_col="cell_name",
         fit_substring="cycle",
-        ref_names=REF_NAMES,  # <-- makes refs red
-        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | fit only '*cycle*'",
+        ref_names=REF_NAMES,
+        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | FAR + refs | fit only non-ref '*cycle*'",
     )
     plot_loglog_scatter_and_polyfit_cycle_only(
         df_all,
@@ -1193,21 +1289,77 @@ def main(dir_path: Path, out_dir: Path):
         y_col="throughput_at_cap93",
         name_col="cell_name",
         fit_substring="cycle",
-        ref_names=REF_NAMES,  # <-- makes refs red
-        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | fit only '*cycle*'",
+        ref_names=REF_NAMES,
+        title="Throughput @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | ALL + refs | fit only non-ref '*cycle*'",
     )
-    m_all = fit_linear_regression_numpy(df_all, x_cols=x_cols, y_col=y_col)
-    m_close = fit_linear_regression_numpy(df_close, x_cols=x_cols, y_col=y_col)
-    m_far = fit_linear_regression_numpy(df_far, x_cols=x_cols, y_col=y_col)
+
+    plot_loglog_scatter_and_polyfit_cycle_only(
+        df_close,
+        x_col="var_dQ_c_at_thr500k",
+        y_col="weeks_at_cap93",
+        name_col="cell_name",
+        fit_substring="cycle",
+        ref_names=REF_NAMES,
+        title="Weeks @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | CLOSE + refs | fit only non-ref '*cycle*'",
+    )
+    plot_loglog_scatter_and_polyfit_cycle_only(
+        df_far,
+        x_col="var_dQ_c_at_thr500k",
+        y_col="weeks_at_cap93",
+        name_col="cell_name",
+        fit_substring="cycle",
+        ref_names=REF_NAMES,
+        title="Weeks @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | FAR + refs | fit only non-ref '*cycle*'",
+    )
+    plot_loglog_scatter_and_polyfit_cycle_only(
+        df_all,
+        x_col="var_dQ_c_at_thr500k",
+        y_col="weeks_at_cap93",
+        name_col="cell_name",
+        fit_substring="cycle",
+        ref_names=REF_NAMES,
+        title="Weeks @ cap% threshold vs var_dQ_c @ throughput=500k (log-log) | ALL + refs | fit only non-ref '*cycle*'",
+    )
+
+    m_all = fit_linear_regression_numpy(df_all_train, x_cols=x_cols, y_col=y_col)
+    m_close = fit_linear_regression_numpy(df_close_train, x_cols=x_cols, y_col=y_col)
+    m_far = fit_linear_regression_numpy(df_far_train, x_cols=x_cols, y_col=y_col)
+
+    pred_all_test = predict_linear_regression_numpy(df_all_test, m_all, x_cols=x_cols)
+    pred_close_test = predict_linear_regression_numpy(df_close_test, m_close, x_cols=x_cols)
+    pred_far_test = predict_linear_regression_numpy(df_far_test, m_far, x_cols=x_cols)
+
+    mape_all = mape_from_cols(pred_all_test, y_true_col=y_col, y_pred_col="y_pred")
+    mape_close = mape_from_cols(pred_close_test, y_true_col=y_col, y_pred_col="y_pred")
+    mape_far = mape_from_cols(pred_far_test, y_true_col=y_col, y_pred_col="y_pred")
 
     print("\n" + "=" * 90)
-    print("Linear regression (separate models): y=weeks_at_cap93")
+    print("Linear regression (fit on NON-ref cells, test on refs)")
     print(f"cap fraction={cap_frac}, var_dQ_c at throughput={thr_target:.0f}")
-    print(f"Filtered out: cells that don't reach cap{cap_frac * 100:.0f}% OR don't span throughput {thr_target:.0f}")
+    print(f"Refs included in df_all / df_close / df_far for plotting and testing, but excluded from fitting")
     print("=" * 90)
-    print("\n[ALL]", m_all)
-    print("\n[NEAREST]", m_close)
-    print("\n[FARTHEST]", m_far)
+
+    print("\n[ALL] fit:", m_all)
+    if not pred_all_test.empty:
+        print("[ALL] ref-test predictions:")
+        print(pred_all_test[["cell_name", y_col, "y_pred"]])
+    print(f"[ALL] ref-test MAPE: {mape_all}")
+
+    print("\n[NEAREST] fit:", m_close)
+    if not pred_close_test.empty:
+        print("[NEAREST] ref-test predictions:")
+        print(pred_close_test[["cell_name", y_col, "y_pred"]])
+    print(f"[NEAREST] ref-test MAPE: {mape_close}")
+
+    print("\n[FARTHEST] fit:", m_far)
+    if not pred_far_test.empty:
+        print("[FARTHEST] ref-test predictions:")
+        print(pred_far_test[["cell_name", y_col, "y_pred"]])
+    print(f"[FARTHEST] ref-test MAPE: {mape_far}")
+
+    plot_ref_pred_vs_actual(pred_all_test, y_col, "Refs: predicted vs actual [ALL]")
+    plot_ref_pred_vs_actual(pred_close_test, y_col, "Refs: predicted vs actual [NEAREST]")
+    plot_ref_pred_vs_actual(pred_far_test, y_col, "Refs: predicted vs actual [FARTHEST]")
 
     added_orange_label = False
     added_orange_label_w = False
@@ -1271,9 +1423,6 @@ def main(dir_path: Path, out_dir: Path):
 
         added_black_label = True
 
-    # -----------------------------
-    # Finalize plots
-    # -----------------------------
     ax.set_xlabel("index")
     ax.set_ylabel("SOH")
     ax.set_title(
@@ -1315,10 +1464,31 @@ def main(dir_path: Path, out_dir: Path):
 
     plt.show()
 
+    loglog_weeks_all = loglog_fit_and_mape(
+        df_all,
+        x_col="var_dQ_c_at_thr500k",
+        y_col="weeks_at_cap93",
+        ref_names=REF_NAMES,
+    )
+
+    loglog_weeks_close = loglog_fit_and_mape(
+        df_close,
+        x_col="var_dQ_c_at_thr500k",
+        y_col="weeks_at_cap93",
+        ref_names=REF_NAMES,
+    )
+
+    loglog_weeks_far = loglog_fit_and_mape(
+        df_far,
+        x_col="var_dQ_c_at_thr500k",
+        y_col="weeks_at_cap93",
+        ref_names=REF_NAMES,
+    )
+
     return df_exp, df_ref, locals().get("dist_df", pd.DataFrame())
 
 
 if __name__ == "__main__":
     dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-    out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
+    out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")
     main(dir_path, out_dir)
