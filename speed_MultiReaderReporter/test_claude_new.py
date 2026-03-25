@@ -1,24 +1,179 @@
 from pathlib import Path
+import math
+import gc
+import os
+import random
+import ast
+
 import numpy as np
 import pandas as pd
-import ast
-from core.capacity import *
-from matplotlib.lines import Line2D
 from scipy.interpolate import CubicSpline
+
+from core.capacity import *
+
 import matplotlib
 # matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader, TensorDataset
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedShuffleSplit
+
+
+# =============================================================================
+# CONFIG
+# =============================================================================
 FEATURE_NAMES_FOR_DIST = ["mean_mid_cha", "mean_high_cha", "mean_pla_cha"]
 
+interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
+out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
+out_fig_dir.mkdir(parents=True, exist_ok=True)
+
+REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
+
+x_col = "Vcha"
+y_col = "dQdVcha"
+
+v_1 = 3.28
+v_2 = 3.35
+v_3 = 3.45
+
+TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
+TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
+SOH_STEP_TARGET = 0.956
+
+K_CLOSEST = 25
+K_FARTHEST = 20
+
+# Choose interpolation method here
+INTERP_METHOD = "linear"      # options: "linear" or "cubic"
+
+INTERP_FEATURES = [
+    "mean_low_cha", "mean_mid_cha", "mean_high_cha", "mean_pla_cha",
+    "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"
+]
+
+# Model config
+FEATURE_COLS = ["SOH", "capacity", "mean_mid_cha", "mean_high_cha", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
+INPUT_STEPS = 7
+INPUT_FEATURES = len(FEATURE_COLS)
+
+TEST_NAMES = [
+    "SPEED_LW_reference_1",
+    "SPEED_LW_reference_2",
+    "SPEED_LW_reference_3",
+]
+
+EPOCHS = 500
+BATCH_SIZE = 16
+LR = 0.001
+DROPOUT = 0.1
+VALIDATION_SPLIT = 0.1
+USE_VALIDATION = True
+N_SEEDS = 10
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+mse_loss = nn.MSELoss()
+
+
+# =============================================================================
+# HELPERS
+# =============================================================================
 def parse_array_string(s):
     s = str(s).replace("NBSP", " ").replace("\\n", " ").replace("\n", " ")
     s = s.strip("[] ")
     return np.fromstring(s, sep=" ")
 
 
+def clean_xy_for_interp(x, y):
+    """
+    Clean x/y for interpolation:
+    - convert to float arrays
+    - remove non-finite values
+    - sort by x ascending
+    - remove duplicate x values (keep first)
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+
+    if len(x) < 2:
+        return None, None
+
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+
+    x_ser = pd.Series(x)
+    keep = ~x_ser.duplicated(keep="first")
+    x = x[keep.values]
+    y = y[keep.values]
+
+    if len(x) < 2:
+        return None, None
+
+    return x, y
+
+
+def interp_1d(x_old, y_old, x_new, method="linear"):
+    """
+    1D interpolation with selectable method:
+    - linear: np.interp
+    - cubic : CubicSpline with fallback to linear
+    """
+    x_old, y_old = clean_xy_for_interp(x_old, y_old)
+    if x_old is None or y_old is None:
+        return None
+
+    x_new = np.asarray(x_new, dtype=float)
+
+    if method == "linear":
+        return np.interp(x_new, x_old, y_old)
+
+    if method == "cubic":
+        # Need at least 3 points for cubic spline
+        if len(x_old) < 3:
+            return np.interp(x_new, x_old, y_old)
+        try:
+            cs = CubicSpline(x_old, y_old, bc_type="natural", extrapolate=False)
+            y_new = cs(x_new)
+
+            # fallback where CubicSpline returns nan (outside range)
+            nan_mask = ~np.isfinite(y_new)
+            if np.any(nan_mask):
+                y_lin = np.interp(x_new, x_old, y_old)
+                y_new[nan_mask] = y_lin[nan_mask]
+            return y_new
+        except Exception:
+            return np.interp(x_new, x_old, y_old)
+
+    raise ValueError("method must be 'linear' or 'cubic'")
+
+
+def interp_value_at_target(x, y, x_target, method="linear"):
+    """
+    Interpolate scalar y-value at x_target.
+    """
+    y_interp = interp_1d(x, y, np.array([x_target], dtype=float), method=method)
+    if y_interp is None or len(y_interp) == 0 or not np.isfinite(y_interp[0]):
+        return None
+    return float(y_interp[0])
+
+
 def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="linear", throughput_max=None):
-    """Interpolate all feature columns on a new reference grid."""
+    """
+    Interpolate all feature columns on a new reference grid.
+    """
     df = df.copy()
     df.iloc[0] = df.iloc[0].fillna(0)
     df["SOH"] = df["cap_ocv_dis"] / df["cap_ocv_dis"].iloc[0]
@@ -41,21 +196,32 @@ def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="line
         return None
 
     reference = df[ref_name].to_numpy(dtype=float)
-    ref_s = pd.Series(reference)
-    keep = ~ref_s.duplicated(keep="first")
-    df = df.loc[keep.values].reset_index(drop=True)
-    reference = df[ref_name].to_numpy(dtype=float)
     target_data = df["SOH"].to_numpy(dtype=float)
 
-    if len(reference) < 2:
-        return None
-    if method == "cubic" and len(reference) < 3:
+    reference, target_data = clean_xy_for_interp(reference, target_data)
+    if reference is None or target_data is None:
         return None
 
-    feature_cols = [c for c in df.columns if c != ref_name]
-    feature = df[feature_cols].to_numpy(dtype=float)
+    # SOH typically decreases, so reverse for interpolation over SOH -> reference
+    ref_for_soh = reference[::-1]
+    soh_for_ref = target_data[::-1]
 
-    interpolated_ref = np.interp(target_soh, target_data[::-1], reference[::-1])
+    if len(ref_for_soh) < 2:
+        return None
+    if method == "cubic" and len(ref_for_soh) < 3:
+        method_local = "linear"
+    else:
+        method_local = method
+
+    interpolated_ref = interp_value_at_target(
+        x=soh_for_ref,
+        y=ref_for_soh,
+        x_target=target_soh,
+        method=method_local
+    )
+    if interpolated_ref is None:
+        return None
+
     new_ref_points_cut = np.linspace(0.0, float(interpolated_ref), 15)
     spacing = float(np.mean(np.diff(new_ref_points_cut))) if len(new_ref_points_cut) > 1 else 0.0
     if spacing <= 0:
@@ -73,73 +239,116 @@ def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="line
 
     new_ref_points = np.concatenate([new_ref_points_cut, np.array(remaining_points, dtype=float)])
 
-    interpolated_columns = []
-    for j in range(feature.shape[1]):
-        yj = feature[:, j]
-        if np.isnan(yj).any() or method == "linear":
-            interpolated_columns.append(np.interp(new_ref_points, reference, yj))
-        elif method == "cubic":
-            try:
-                cs = CubicSpline(reference, yj, bc_type="natural", extrapolate=False)
-                interpolated_columns.append(cs(new_ref_points))
-            except:
-                interpolated_columns.append(np.interp(new_ref_points, reference, yj))
+    feature_cols = [c for c in df.columns if c != ref_name]
+    out = pd.DataFrame(index=np.arange(len(new_ref_points)))
 
-    out = pd.DataFrame(np.stack(interpolated_columns, axis=1), columns=feature_cols)
+    for col in feature_cols:
+        yj = df[col].to_numpy(dtype=float)
+        y_new = interp_1d(reference, yj, new_ref_points, method=method_local)
+        if y_new is None:
+            return None
+        out[col] = y_new
+
     out[ref_name] = new_ref_points
     if "SOH" in out.columns:
         out["SOH"] = out["SOH"].clip(lower=0.0, upper=1.05)
+
     return out
 
 
-def features_at_soh(feat_dict, target_soh=0.995):
+def features_at_soh(feat_dict, target_soh=0.995, method="linear"):
     """
     Use capacity from feat_dict to get SOH per row,
     then interpolate each feature list to target_soh.
     """
     cap = np.array(feat_dict["capacity"], dtype=float)
-    cap = cap[~np.isnan(cap)]
+    cap = cap[np.isfinite(cap)]
+
     if len(cap) < 2 or cap[0] == 0:
         return None
-    soh = cap / cap[0]
 
+    soh = cap / cap[0]
     out = {}
+
     for fname in FEATURE_NAMES_FOR_DIST:
         vals = feat_dict.get(fname, [])
         if len(vals) == 0:
             return None
+
         vals = np.array(vals, dtype=float)
         n = min(len(soh), len(vals))
         if n < 2:
             return None
-        # SOH is decreasing → flip for np.interp
-        val_at_target = np.interp(target_soh, soh[:n][::-1], vals[:n][::-1])
+
+        # SOH decreasing -> reverse so x is ascending
+        x = soh[:n][::-1]
+        y = vals[:n][::-1]
+
+        val_at_target = interp_value_at_target(x, y, target_soh, method=method)
+        if val_at_target is None:
+            return None
+
         out[fname] = float(val_at_target)
+
     return out
 
-interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
-out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
-out_fig_dir.mkdir(parents=True, exist_ok=True)
-REF_NAMES = ["SPEED_LW_reference_1","SPEED_LW_reference_2","SPEED_LW_reference_3"]
 
-x_col = "Vcha"
-y_col = "dQdVcha"
-v_1 = 3.25
-v_2 = 3.35
-v_3 = 3.4
+def set_seed(seed=42):
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
-TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-K_CLOSEST = 25
-K_FARTHEST = 20
-INTERP_METHOD = "linear"
 
+def create_balanced_val_split(X, y, val_fraction=0.2, bins=3):
+    y = np.array(y)
+    y_bins = pd.qcut(y, q=bins, labels=False, duplicates="drop")
+    mid_val_frac = int(val_fraction * len(y)) / len(y)
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=mid_val_frac, random_state=42)
+    train_idx, val_idx = next(sss.split(X, y_bins))
+    return X[train_idx], y[train_idx], X[val_idx], y[val_idx]
+
+
+# =============================================================================
+# MODEL
+# =============================================================================
+class TinyTemporalCNN(nn.Module):
+    def __init__(self, input_dims, timesteps, dropout_rate=0.5):
+        super().__init__()
+        self.conv1 = nn.Conv1d(input_dims, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(16, 8, kernel_size=3, padding=1)
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.fc1 = nn.Linear(8, 8)
+        self.fc2 = nn.Linear(8, 1)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.bn1 = nn.BatchNorm1d(16)
+        self.bn2 = nn.BatchNorm1d(8)
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.dropout(x)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.dropout(x)
+        x = self.pool(x).squeeze(-1)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        return self.fc2(x)
+
+
+# =============================================================================
+# STEP 1: LOAD CSVS, PLOT RAW CURVES, EXTRACT FEATURES
+# =============================================================================
 results = {}
 results_ref = {}
 
 for csv_file in sorted(interp_dir.glob("*.csv")):
     if csv_file.name.startswith("_"):
         continue
+
     cell_name = csv_file.stem
 
     # only process refs and cycle cells
@@ -149,23 +358,22 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
         continue
 
     df = pd.read_csv(csv_file)
-    df["dQdVcha"] = (df["dQdVcha"].str.strip("[]").str.split().apply(lambda x: np.asarray(x, dtype=float)))
-    df["Vcha"] = (df["Vcha"].str.strip("[]").str.split().apply(lambda x: np.asarray(x, dtype=float)))
-    df["Q_intVcha"] = (df["Q_intVcha"].str.strip("[]").str.split().apply(lambda x: np.asarray(x, dtype=float)))
 
-    if x_col not in df.columns or y_col not in df.columns:
-        del df
+    if x_col not in df.columns or y_col not in df.columns or "Q_intVcha" not in df.columns:
         continue
 
+    # keep original string columns for parse_array_string
     fig, ax = plt.subplots(figsize=(10, 6))
     for idx in range(len(df)):
         try:
             x_arr = parse_array_string(df[x_col].iloc[idx])
             y_arr = parse_array_string(df[y_col].iloc[idx])
-        except:
+        except Exception:
             continue
+
         if len(x_arr) != len(y_arr):
             continue
+
         ax.plot(x_arr, y_arr, alpha=0.3, linewidth=0.8)
 
     ax.set_xlabel(x_col)
@@ -180,64 +388,72 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
     fig.savefig(out_fig_dir / f"{cell_name}.png", dpi=150)
     plt.close(fig)
 
+    # Convert columns needed by feature functions
+    df["dQdVcha"] = df["dQdVcha"].str.strip("[]").str.split().apply(lambda x: np.asarray(x, dtype=float))
+    df["Vcha"] = df["Vcha"].str.strip("[]").str.split().apply(lambda x: np.asarray(x, dtype=float))
+    df["Q_intVcha"] = df["Q_intVcha"].str.strip("[]").str.split().apply(lambda x: np.asarray(x, dtype=float))
+
     # calculate features
-    mean_low_cha, var_low_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=2.7, x_hi=v_1)
+    mean_low_cha, var_low_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=3.2, x_hi=v_1)
     mean_mid_cha, var_mid_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_1, x_hi=v_2)
     mean_high_cha, var_high_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_2, x_hi=v_3)
     mean_pla_cha, var_pla_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_3, x_hi=3.6)
+
     capacity = df["Q_intVcha"].apply(lambda x: x[-1])
     SOH = capacity / capacity.iloc[0]
-    throughput = np.array(df["throughput_sum"])
+    throughput = np.cumsum(np.array(df["throughput_sum"]))
 
     df["CU_time"] = pd.to_datetime(df["CU_time"])
     t0 = df["CU_time"].iloc[0]
     df["time_weeks"] = (df["CU_time"] - t0).dt.total_seconds() / (7 * 24 * 3600)
     time_array = df["time_weeks"].to_numpy()
 
-    feat_dict  = {
-        "mean_low_cha": mean_low_cha,
-        "var_low_cha": var_low_cha,
-        "mean_mid_cha": mean_mid_cha,
-        "var_mid_cha": var_mid_cha,
-        "mean_high_cha": mean_high_cha,
-        "var_high_cha": var_high_cha,
-        "mean_pla_cha": mean_pla_cha,
-        "var_pla_cha": var_pla_cha,
-        "capacity": capacity,
-        "throughput": throughput,
-        "Time": time_array,
+    feat_dict = {
+        "mean_low_cha": np.array(mean_low_cha, dtype=float),
+        "var_low_cha": np.array(var_low_cha, dtype=float),
+        "mean_mid_cha": np.array(mean_mid_cha, dtype=float),
+        "var_mid_cha": np.array(var_mid_cha, dtype=float),
+        "mean_high_cha": np.array(mean_high_cha, dtype=float),
+        "var_high_cha": np.array(var_high_cha, dtype=float),
+        "mean_pla_cha": np.array(mean_pla_cha, dtype=float),
+        "var_pla_cha": np.array(var_pla_cha, dtype=float),
+        "capacity": np.array(capacity, dtype=float),
+        "throughput": np.array(throughput, dtype=float),
+        "Time": np.array(time_array, dtype=float),
+        "SOH_raw": np.array(SOH, dtype=float),
     }
 
     for key in list(feat_dict.keys()):
-        if key not in ("SOH", "capacity"):
-            feat_dict[f"{key}"] = feat_dict[key] / capacity.iloc[0]
+        if key not in ("SOH", "SOH_raw", "capacity", "throughput", "Time"):
+            feat_dict[key] = feat_dict[key] / capacity.iloc[0]
 
     if is_ref:
         results_ref[cell_name] = feat_dict
     else:
         results[cell_name] = feat_dict
-    # plt.show()
-    # del df
+
     print(f"{'[REF] ' if is_ref else '[TRAIN]'} {cell_name}: done")
 
-# build feature vectors at SOH=0.995
+
+# =============================================================================
+# STEP 2: BUILD FEATURE VECTORS AT SOH=0.995 AND FIND CLOSEST/FARTHEST
+# =============================================================================
 ref_feat_at_soh = {}
 for cn, fd in results_ref.items():
-    f = features_at_soh(fd, TARGET_SOH_FEATURES)
+    f = features_at_soh(fd, TARGET_SOH_FEATURES, method=INTERP_METHOD)
     if f is not None:
         ref_feat_at_soh[cn] = f
         print(f"[REF  @ SOH={TARGET_SOH_FEATURES}] {cn}: {f}")
 
 exp_feat_at_soh = {}
 for cn, fd in results.items():
-    f = features_at_soh(fd, TARGET_SOH_FEATURES)
+    f = features_at_soh(fd, TARGET_SOH_FEATURES, method=INTERP_METHOD)
     if f is not None:
         exp_feat_at_soh[cn] = f
 
 print(f"\nRef cells with features: {len(ref_feat_at_soh)}")
 print(f"Exp cells with features: {len(exp_feat_at_soh)}")
 
-# compute distances
 closest_cellnames = []
 farthest_cellnames = []
 
@@ -272,24 +488,33 @@ if len(ref_feat_at_soh) > 0 and len(exp_feat_at_soh) > 0:
     for i in closest_idx:
         print(f"  {exp_names_list[i]:40s}  dist={dist_min[i]:.4f}")
 
-# ── STEP 3: Interpolate trajectories + features at SOH=0.98 ────────────
+    print(f"\nFarthest {k2} cells:")
+    for i in farthest_idx:
+        print(f"  {exp_names_list[i]:40s}  dist={dist_min[i]:.4f}")
+
+
+# =============================================================================
+# STEP 3: INTERPOLATE TRAJECTORIES + FEATURES AT SOH=0.98
+# =============================================================================
 closest_set = set(closest_cellnames)
 farthest_set = set(farthest_cellnames)
 ref_set = set(REF_NAMES)
 
-INTERP_FEATURES = ["mean_low_cha", "mean_mid_cha", "mean_high_cha", "mean_pla_cha",
-                    "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
-
 fig_w, ax_w = plt.subplots(figsize=(10, 6))
 added_labels = {"blue": False, "orange": False, "green": False, "red": False}
-label_map = {"red": "refs", "orange": f"closest {K_CLOSEST}", "green": f"farthest {K_FARTHEST}", "blue": "other"}
+label_map = {
+    "red": "refs",
+    "orange": f"closest {K_CLOSEST}",
+    "green": f"farthest {K_FARTHEST}",
+    "blue": "other"
+}
 
 all_results = {**results_ref, **results}
-interp_data = {}  # dict of dicts: interp_data[cell_name] = {"SOH": arr, "mean_mid_cha": arr, ...}
+interp_data = {}
 
 for cell_name, fd in all_results.items():
     cap = np.array(fd["capacity"], dtype=float)
-    time_arr = np.array(fd["Time"], dtype=float)
+    time_arr = np.array(fd["throughput"], dtype=float)
 
     if len(cap) < 3 or cap[0] == 0:
         continue
@@ -300,7 +525,14 @@ for cell_name, fd in all_results.items():
     if np.nanmin(soh) > TARGET_SOH_PLOT:
         t_target = time_arr[-1]
     else:
-        t_target = float(np.interp(TARGET_SOH_PLOT, soh[::-1], time_arr[::-1]))
+        t_target = interp_value_at_target(
+            x=soh[::-1],
+            y=time_arr[::-1],
+            x_target=TARGET_SOH_PLOT,
+            method=INTERP_METHOD
+        )
+        if t_target is None:
+            continue
 
     # 5 points up to t_target, then continue with same spacing
     grid_dense = np.linspace(0, t_target, 5)
@@ -313,31 +545,42 @@ for cell_name, fd in all_results.items():
     while cur + spacing <= time_arr[-1]:
         cur += spacing
         grid_extra.append(cur)
+
     t_grid = np.concatenate([grid_dense, np.array(grid_extra, dtype=float)])
 
-    # interpolate SOH
-    soh_interp = np.interp(t_grid, time_arr, soh)
+    # interpolate SOH and capacity
+    soh_interp = interp_1d(time_arr, soh, t_grid, method=INTERP_METHOD)
+    cap_interp = interp_1d(time_arr, cap, t_grid, method=INTERP_METHOD)
 
-    # interpolate all features onto the same grid
+    if soh_interp is None or cap_interp is None:
+        continue
+
     cell_interp = {
         "time": t_grid,
         "SOH": soh_interp,
-        "capacity": np.interp(t_grid, time_arr, cap),
+        "capacity": cap_interp,
     }
 
+    # interpolate all features onto the same grid
     for feat_name in INTERP_FEATURES:
         feat_vals = fd.get(feat_name, [])
         if len(feat_vals) == 0:
             continue
+
         feat_vals = np.array(feat_vals, dtype=float)
         n = min(len(time_arr), len(feat_vals))
         if n < 2:
             continue
-        cell_interp[feat_name] = np.interp(t_grid, time_arr[:n], feat_vals[:n])
+
+        y_new = interp_1d(time_arr[:n], feat_vals[:n], t_grid, method=INTERP_METHOD)
+        if y_new is None:
+            continue
+
+        cell_interp[feat_name] = y_new
 
     interp_data[cell_name] = cell_interp
 
-    # ── plot SOH ──
+    # plot SOH
     if cell_name in ref_set:
         color, lw, alpha = "red", 1.8, 0.95
     elif cell_name in closest_set:
@@ -357,36 +600,52 @@ for cell_name, fd in all_results.items():
 ax_w.set_xlabel("Step")
 ax_w.set_ylabel("SOH")
 ax_w.set_title(
-    f"SOH trajectories (interp @ {TARGET_SOH_PLOT}, features @ {TARGET_SOH_FEATURES})\n"
+    f"SOH trajectories ({INTERP_METHOD} interp @ {TARGET_SOH_PLOT}, "
+    f"features @ {TARGET_SOH_FEATURES})\n"
     f"closest/farthest based on dQdV windowed features"
 )
 ax_w.set_ylim(0.8, 1.05)
 ax_w.grid(True, alpha=0.3)
 ax_w.legend(loc="best")
 fig_w.tight_layout()
-fig_w.savefig(out_fig_dir / "SOH_vs_time_closest_farthest.png", dpi=150)
+fig_w.savefig(out_fig_dir / f"SOH_vs_time_closest_farthest_{INTERP_METHOD}.png", dpi=150)
 plt.show()
 
-# interp_data is now ready for model training
-# Access like: interp_data["SPEED_LW_cycle_1"]["mean_mid_cha"]  → numpy array
-# All arrays for a given cell have the same length (same t_grid)
 print(f"\nInterpolated {len(interp_data)} cells with features: {INTERP_FEATURES}")
 
-SOH_STEP_TARGET = 0.96
 
+# =============================================================================
+# STEP 4: FIND INTERPOLATED STEP TO TARGET SOH
+# =============================================================================
 for cell_name, cell_dict in interp_data.items():
-    soh = cell_dict["SOH"]
-    hits = np.where(soh <= SOH_STEP_TARGET)[0]
-    if len(hits) > 0 and hits[0] > 0:
-        cell_dict["step_to_target"] = int(hits[0])
-    else:
+    soh = np.asarray(cell_dict["SOH"], dtype=float)
+
+    if len(soh) < 2 or not np.all(np.isfinite(soh)):
         cell_dict["step_to_target"] = None
+        continue
 
-# ── Plot all interpolated features as subplots ──────────────────────────
-import math
-from matplotlib.lines import Line2D
+    # step axis on interpolated grid
+    step_axis = np.arange(len(soh), dtype=float)
 
-# features available in interp_data that you want to visualize
+    # if target SOH is never reached, keep None
+    if np.nanmin(soh) > SOH_STEP_TARGET:
+        cell_dict["step_to_target"] = None
+        continue
+
+    # interpolate fractional step where SOH reaches target
+    step_to_target = interp_value_at_target(
+        x=soh[::-1],          # SOH ascending after reverse
+        y=step_axis[::-1],    # corresponding step positions
+        x_target=SOH_STEP_TARGET,
+        method=INTERP_METHOD  # or use "linear" if you want monotonic safety
+    )
+
+    cell_dict["step_to_target"] = step_to_target
+
+
+# =============================================================================
+# STEP 5: PLOT ALL INTERPOLATED FEATURES
+# =============================================================================
 PLOT_FEATURES = [
     "SOH",
     "capacity",
@@ -394,7 +653,6 @@ PLOT_FEATURES = [
     "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha",
 ]
 
-# keep only features that actually exist in at least one cell
 plot_features_existing = [
     f for f in PLOT_FEATURES
     if any(f in cell_dict for cell_dict in interp_data.values())
@@ -407,12 +665,11 @@ n_rows = math.ceil(n_feat / n_cols)
 fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.5 * n_cols, 4.0 * n_rows))
 axes = np.array(axes).reshape(-1)
 
-# styling
 style_map = {
-    "ref":      {"color": "red",    "lw": 1.8, "alpha": 0.95},
-    "closest":  {"color": "orange", "lw": 1.2, "alpha": 0.85},
-    "farthest": {"color": "green",  "lw": 1.2, "alpha": 0.85},
-    "other":    {"color": "blue",   "lw": 0.6, "alpha": 0.20},
+    "ref": {"color": "red", "lw": 1.8, "alpha": 0.95},
+    "closest": {"color": "orange", "lw": 1.2, "alpha": 0.85},
+    "farthest": {"color": "green", "lw": 1.2, "alpha": 0.85},
+    "other": {"color": "blue", "lw": 0.6, "alpha": 0.20},
 }
 
 for ax, feat_name in zip(axes, plot_features_existing):
@@ -421,7 +678,7 @@ for ax, feat_name in zip(axes, plot_features_existing):
             continue
 
         y = np.asarray(cell_dict[feat_name], dtype=float)
-        x = np.arange(len(y))   # step index on interpolated grid
+        x = np.arange(len(y))
 
         if cell_name in ref_set:
             st = style_map["ref"]
@@ -439,139 +696,42 @@ for ax, feat_name in zip(axes, plot_features_existing):
     ax.set_ylabel(feat_name)
     ax.grid(True, alpha=0.3)
 
-# hide unused axes
 for ax in axes[n_feat:]:
     ax.axis("off")
 
-# shared legend
 legend_handles = [
-    Line2D([0], [0], color="red",    lw=1.8, alpha=0.95, label="refs"),
+    Line2D([0], [0], color="red", lw=1.8, alpha=0.95, label="refs"),
     Line2D([0], [0], color="orange", lw=1.2, alpha=0.85, label=f"closest {K_CLOSEST}"),
-    Line2D([0], [0], color="green",  lw=1.2, alpha=0.85, label=f"farthest {K_FARTHEST}"),
-    Line2D([0], [0], color="blue",   lw=1.0, alpha=0.50, label="other"),
+    Line2D([0], [0], color="green", lw=1.2, alpha=0.85, label=f"farthest {K_FARTHEST}"),
+    Line2D([0], [0], color="blue", lw=1.0, alpha=0.50, label="other"),
 ]
 fig.legend(handles=legend_handles, loc="upper center", ncol=4, frameon=True)
 
 fig.suptitle(
     f"Interpolated feature trajectories\n"
-    f"(grid anchored at SOH={TARGET_SOH_PLOT}, closest/farthest based on features at SOH={TARGET_SOH_FEATURES})",
+    f"({INTERP_METHOD} grid anchored at SOH={TARGET_SOH_PLOT}, "
+    f"closest/farthest based on features at SOH={TARGET_SOH_FEATURES})",
     y=0.995
 )
 
 fig.tight_layout(rect=[0, 0, 1, 0.95])
-fig.savefig(out_fig_dir / "all_interpolated_features_subplots.png", dpi=150)
+fig.savefig(out_fig_dir / f"all_interpolated_features_subplots_{INTERP_METHOD}.png", dpi=150)
 plt.show()
 
-# make the model and train it
-"""
-Predict step number at SOH target from interpolated dQdV features.
 
-Uses interp_data dictionary (already in memory from the previous script).
-Training data : cells with 'cycle' in the name
-Test data     : SPEED_LW_reference_1, SPEED_LW_reference_2, SPEED_LW_reference_3
-"""
-
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-from torch.optim.lr_scheduler import ReduceLROnPlateau
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedShuffleSplit
-import os
-import pandas as pd
-import random
-import gc
-
-# ── Config ──────────────────────────────────────────────────────────────
-FEATURE_COLS = ["SOH", "mean_mid_cha", "mean_high_cha", "mean_pla_cha",
-                "var_mid_cha", "var_high_cha", "var_pla_cha"]
-
-SOH_STEP_TARGET = 0.95   # target SOH to find the step number for
-INPUT_STEPS = 6           # how many interpolated time steps to use as input
-INPUT_FEATURES = len(FEATURE_COLS)
-
-TEST_NAMES = [
-    "SPEED_LW_reference_1",
-    "SPEED_LW_reference_2",
-    "SPEED_LW_reference_3",
-]
-
-# Training hyperparams
-EPOCHS = 500
-BATCH_SIZE = 16
-LR = 0.001
-DROPOUT = 0.1
-VALIDATION_SPLIT = 0.2
-USE_VALIDATION = True
-N_SEEDS = 10
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-mse_loss = nn.MSELoss()
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────
-def set_seed(seed=42):
-    seed = int(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def create_balanced_val_split(X, y, val_fraction=0.2, bins=3):
-    y = np.array(y)
-    y_bins = pd.qcut(y, q=bins, labels=False, duplicates="drop")
-    mid_val_frac = int(val_fraction * len(y)) / len(y)
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=mid_val_frac, random_state=42)
-    train_idx, val_idx = next(sss.split(X, y_bins))
-    return X[train_idx], y[train_idx], X[val_idx], y[val_idx]
-
-
-# ── Model ───────────────────────────────────────────────────────────────
-class TinyTemporalCNN(nn.Module):
-    def __init__(self, input_dims, timesteps, dropout_rate=0.5):
-        super().__init__()
-        self.conv1 = nn.Conv1d(input_dims, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(16, 16, kernel_size=3, padding=1)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(16, 8)
-        self.fc2 = nn.Linear(8, 1)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.bn1 = nn.BatchNorm1d(16)
-        self.bn2 = nn.BatchNorm1d(16)
-
-    def forward(self, x):
-        x = x.permute(0, 2, 1)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = self.dropout(x)
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = self.dropout(x)
-        x = self.pool(x).squeeze(-1)
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        return self.fc2(x)
-
-
-# ── Load data from interp_data dictionary ──────────────────────────────
+# =============================================================================
+# STEP 6: MAKE DATASET FOR MODEL
+# =============================================================================
 print("Loading data from interp_data dictionary ...")
 
 train_X_list, train_y_list, train_names = [], [], []
 test_X_list, test_y_list, test_names_found = [], [], []
 
 for cell_name, cell_dict in interp_data.items():
-    # check all features exist
     missing = [f for f in FEATURE_COLS if f not in cell_dict]
     if missing:
         print(f"  [SKIP] {cell_name} — missing {missing}")
         continue
-
-    soh = cell_dict["SOH"]
 
     step_to_target = cell_dict.get("step_to_target")
     if step_to_target is None or step_to_target <= 0:
@@ -579,11 +739,10 @@ for cell_name, cell_dict in interp_data.items():
         continue
     step_to_target = float(step_to_target)
 
-    # build feature matrix (n_steps, n_features)
     feat_arrays = []
     for f in FEATURE_COLS:
-        feat_arrays.append(cell_dict[f])
-    feat_mat = np.stack(feat_arrays, axis=1)  # (n_steps, n_features)
+        feat_arrays.append(np.asarray(cell_dict[f], dtype=float))
+    feat_mat = np.stack(feat_arrays, axis=1)
 
     if len(feat_mat) < INPUT_STEPS:
         print(f"  [SKIP] {cell_name} — only {len(feat_mat)} steps, need {INPUT_STEPS}")
@@ -594,7 +753,6 @@ for cell_name, cell_dict in interp_data.items():
         print(f"  [SKIP] {cell_name} — non-finite values")
         continue
 
-    # assign to train or test
     if cell_name in TEST_NAMES:
         test_X_list.append(X_seq)
         test_y_list.append(step_to_target)
@@ -617,7 +775,10 @@ print(f"\nTrain: {X_train_all.shape[0]} cells,  Test: {X_test.shape[0]} cells")
 print(f"Features: {FEATURE_COLS}")
 print(f"Input shape per cell: ({INPUT_STEPS}, {INPUT_FEATURES})")
 
-# ── Scale features ──────────────────────────────────────────────────────
+
+# =============================================================================
+# STEP 7: SCALE FEATURES
+# =============================================================================
 combined = np.concatenate([X_train_all, X_test], axis=0)
 flat = combined.reshape(-1, INPUT_FEATURES)
 scaler = StandardScaler()
@@ -626,39 +787,50 @@ combined_scaled = flat_scaled.reshape(combined.shape)
 X_train_all = combined_scaled[:len(train_X_list)]
 X_test = combined_scaled[len(train_X_list):]
 
-# ── Log-transform target ───────────────────────────────────────────────
+# log-transform target
 y_train_all = np.log(y_train_all)
 y_test = np.log(y_test)
 
-# ── Train / val split ──────────────────────────────────────────────────
-if USE_VALIDATION and len(X_train_all) > 10:
+
+# =============================================================================
+# STEP 8: TRAIN / VAL SPLIT
+# =============================================================================
+use_validation_local = USE_VALIDATION
+if use_validation_local and len(X_train_all) > 10:
     X_train, y_train, X_val, y_val = create_balanced_val_split(
-        X_train_all, y_train_all, val_fraction=VALIDATION_SPLIT,
+        X_train_all,
+        y_train_all,
+        val_fraction=VALIDATION_SPLIT,
         bins=min(3, len(X_train_all) // 3)
     )
 else:
     X_train, y_train = X_train_all, y_train_all
     X_val, y_val = None, None
-    USE_VALIDATION = False
+    use_validation_local = False
 
-# ── Tensors ─────────────────────────────────────────────────────────────
 X_train_t = torch.from_numpy(X_train).float().to(device)
 y_train_t = torch.from_numpy(y_train).float().view(-1, 1).to(device)
-if USE_VALIDATION:
+
+if use_validation_local:
     X_val_t = torch.from_numpy(X_val).float().to(device)
     y_val_t = torch.from_numpy(y_val).float().view(-1, 1).to(device)
+
 X_test_t = torch.from_numpy(X_test).float().to(device)
 y_test_t = torch.from_numpy(y_test).float().view(-1, 1)
 
 train_dataset = TensorDataset(X_train_t, y_train_t)
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-# ── Training loop (ensemble over seeds) ─────────────────────────────────
+
+# =============================================================================
+# STEP 9: TRAIN ENSEMBLE
+# =============================================================================
 random_numbers = np.random.choice(range(0, 100), size=N_SEEDS, replace=False)
 y_pred_list = []
 
 for i in random_numbers:
     print(f"\n── Seed {i} ──")
+
     if "model" in locals():
         del model, optimizer
         torch.cuda.empty_cache()
@@ -675,6 +847,10 @@ for i in random_numbers:
     epochs_no_improve = 0
     early_stop = False
 
+    save_dir = "savemodel"
+    os.makedirs(save_dir, exist_ok=True)
+    best_model_path = os.path.join(save_dir, f"best_model_dqdv_{INTERP_METHOD}.pth")
+
     for epoch in range(EPOCHS + 1):
         if early_stop:
             print(f"  Early stop at epoch {epoch}")
@@ -688,7 +864,7 @@ for i in random_numbers:
             loss.backward()
             optimizer.step()
 
-        if USE_VALIDATION and (epoch % 10 == 0 or epoch == EPOCHS):
+        if use_validation_local and (epoch % 10 == 0 or epoch == EPOCHS):
             model.eval()
             with torch.no_grad():
                 val_out = model(X_val_t)
@@ -698,8 +874,7 @@ for i in random_numbers:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     epochs_no_improve = 0
-                    os.makedirs("savemodel", exist_ok=True)
-                    torch.save(model.state_dict(), "savemodel/best_model_dqdv.pth")
+                    torch.save(model.state_dict(), best_model_path)
                 else:
                     epochs_no_improve += 1
                     if epochs_no_improve >= early_patience:
@@ -707,31 +882,33 @@ for i in random_numbers:
 
         if epoch % 100 == 0:
             msg = f"  Epoch {epoch}/{EPOCHS}  loss={loss.item():.4f}"
-            if USE_VALIDATION:
+            if use_validation_local:
                 msg += f"  val_loss={val_loss.item():.4f}"
             print(msg)
 
-    # Load best model for prediction
-    if USE_VALIDATION and os.path.exists("savemodel/best_model_dqdv.pth"):
-        model.load_state_dict(torch.load("savemodel/best_model_dqdv.pth"))
+    if use_validation_local and os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path))
 
     model.eval()
     with torch.no_grad():
         y_pred = model(X_test_t).cpu().numpy().reshape(-1)
     y_pred_list.append(y_pred)
 
-# ── Results ─────────────────────────────────────────────────────────────
+
+# =============================================================================
+# STEP 10: RESULTS
+# =============================================================================
 y_pred_mean = np.mean(y_pred_list, axis=0)
 
 print("\n" + "=" * 70)
-print("RESULTS (log space)")
+print(f"RESULTS (log space) — interpolation={INTERP_METHOD}")
 print("=" * 70)
 for name, true, pred in zip(test_names_found, y_test, y_pred_mean):
     print(f"  {name:30s}  true={true:.4f}  pred={pred:.4f}")
 
 print(f"\n  MAPE (log):  {np.mean(np.abs((y_test - y_pred_mean) / y_test)) * 100:.2f}%")
 
-# Back to original scale (steps)
+# Back to original scale
 y_test_steps = np.exp(y_test)
 y_pred_steps = np.exp(y_pred_mean)
 
@@ -745,7 +922,10 @@ mape = np.mean(np.abs((y_test_steps - y_pred_steps) / y_test_steps)) * 100
 print(f"\n  RMSE (steps): {rmse:.2f}")
 print(f"  MAPE (steps): {mape:.2f}%")
 
-# ── Plot ────────────────────────────────────────────────────────────────
+
+# =============================================================================
+# STEP 11: FINAL PLOTS
+# =============================================================================
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
 ax1 = axes[0]
@@ -756,7 +936,7 @@ ax1.bar(x_pos + width / 2, y_pred_steps, width, label="Predicted", color="coral"
 ax1.set_xticks(x_pos)
 ax1.set_xticklabels([n.replace("SPEED_LW_", "") for n in test_names_found], rotation=15)
 ax1.set_ylabel("Steps to SOH target")
-ax1.set_title(f"True vs Predicted steps  (RMSE={rmse:.1f}, MAPE={mape:.1f}%)")
+ax1.set_title(f"True vs Predicted steps ({INTERP_METHOD}, RMSE={rmse:.1f}, MAPE={mape:.1f}%)")
 ax1.legend()
 ax1.grid(True, alpha=0.3)
 
@@ -768,10 +948,9 @@ for j, name in enumerate(test_names_found):
 ax2.set_xticks(range(len(test_names_found)))
 ax2.set_xticklabels([n.replace("SPEED_LW_", "") for n in test_names_found], rotation=15)
 ax2.set_ylabel("Steps to SOH target")
-ax2.set_title("Ensemble predictions (dots) vs true (stars)")
+ax2.set_title(f"Ensemble predictions ({INTERP_METHOD}) vs true")
 ax2.grid(True, alpha=0.3)
 
 fig.tight_layout()
+fig.savefig(out_fig_dir / f"prediction_results_{INTERP_METHOD}.png", dpi=150)
 plt.show()
-
-

@@ -307,7 +307,7 @@ def load_and_interpolate(
 
     interpolated_ref = np.interp(target_soh, target_data[::-1], reference[::-1])
 
-    new_ref_points_cut = np.linspace(0.0, float(interpolated_ref), 15)
+    new_ref_points_cut = np.linspace(0.0, float(interpolated_ref), 5)
     spacing = float(np.mean(np.diff(new_ref_points_cut))) if len(new_ref_points_cut) > 1 else 0.0
     if spacing <= 0:
         return None
@@ -476,7 +476,7 @@ def main(
     rows_ref = []
 
     # Reference cell names
-    REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
+    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
 
     # CONFIG YOU WANT:
     K_CLOSEST_FEATURE = 25
@@ -1370,6 +1370,175 @@ def main(
     df_summary.to_csv(interp_feat_dir / "_summary_all_cells.csv", index=False)
     print(f"\nSaved {len(summary_rows)} cell files + summary to {interp_feat_dir}")
 
+    # --- Log-log scatter plots for ALL mean*/var* features (farthest excluded) ---
+    # x = log(|feature value at FEATURE_STEP|)
+    # y = log(steps to SOH <= SOH_STEP_TARGET)
+
+    # collect all candidate interpolated feature names
+    candidate_loglog_features = set()
+    for _, df_interp in traj_interp_weeks_by_cell.items():
+        for col in df_interp.columns:
+            if col.startswith("mean") or col.startswith("var"):
+                candidate_loglog_features.add(col)
+
+    candidate_loglog_features = sorted(candidate_loglog_features)
+
+    if len(candidate_loglog_features) == 0:
+        print("\n[WARN] No interpolated features starting with 'mean' or 'var' found for log-log plots.")
+    else:
+        n_feat = len(candidate_loglog_features)
+        ncols = 3
+        nrows = math.ceil(n_feat / ncols)
+
+        fig_loggrid, axes_loggrid = plt.subplots(
+            nrows, ncols,
+            figsize=(5.8 * ncols, 4.5 * nrows),
+            sharex=False,
+            sharey=False
+        )
+        axes_loggrid = np.array(axes_loggrid).ravel()
+
+        # optional summary table
+        loglog_summary_rows = []
+
+        for i, feat_name in enumerate(candidate_loglog_features):
+            ax_ll = axes_loggrid[i]
+
+            log_feat_arr = []
+            log_steps_arr = []
+            color_arr = []
+
+            for cname, df_interp in traj_interp_weeks_by_cell.items():
+                if cname in _farthest_set:
+                    continue
+                if "SOH" not in df_interp.columns:
+                    continue
+                if feat_name not in df_interp.columns:
+                    continue
+
+                soh_vals = df_interp["SOH"].to_numpy(dtype=float)
+
+                # must actually reach target SOH
+                last_soh = soh_vals[~np.isnan(soh_vals)]
+                if len(last_soh) == 0 or last_soh[-1] > SOH_STEP_TARGET:
+                    continue
+
+                hits = np.where(soh_vals <= SOH_STEP_TARGET)[0]
+                if len(hits) == 0:
+                    continue
+
+                n_steps = int(hits[0])
+                if n_steps <= 0:
+                    continue
+
+                feat_vals = df_interp[feat_name].to_numpy(dtype=float)
+                if len(feat_vals) <= FEATURE_STEP:
+                    continue
+
+                fv = feat_vals[FEATURE_STEP]
+                if not np.isfinite(fv):
+                    continue
+                if fv == 0.0:
+                    continue
+
+                # same transform style as your original code
+                log_feat_arr.append(np.log(np.abs(fv)))
+                log_steps_arr.append(np.log(n_steps))
+
+                if cname in _ref_set:
+                    color_arr.append("red")
+                elif cname in _closest_set:
+                    color_arr.append("orange")
+                else:
+                    color_arr.append("blue")
+
+            log_feat_arr = np.array(log_feat_arr, dtype=float)
+            log_steps_arr = np.array(log_steps_arr, dtype=float)
+
+            if len(log_feat_arr) < 2:
+                ax_ll.set_title(f"{feat_name}\ninsufficient data")
+                ax_ll.grid(True, alpha=0.3)
+                loglog_summary_rows.append({
+                    "feature": feat_name,
+                    "n": len(log_feat_arr),
+                    "slope": np.nan,
+                    "intercept": np.nan,
+                    "corr_r": np.nan,
+                })
+                continue
+
+            # scatter by group color
+            label_map = {"blue": "other", "orange": "closest", "red": "refs"}
+            for cv in ["blue", "orange", "red"]:
+                m = np.array([c == cv for c in color_arr])
+                if not m.any():
+                    continue
+                ax_ll.scatter(
+                    log_feat_arr[m],
+                    log_steps_arr[m],
+                    c=cv,
+                    s=35,
+                    alpha=0.75,
+                    edgecolors="k",
+                    linewidths=0.35,
+                    label=label_map[cv],
+                )
+
+            # linear fit in log-log space
+            coeffs = np.polyfit(log_feat_arr, log_steps_arr, 1)
+            slope = float(coeffs[0])
+            intercept = float(coeffs[1])
+
+            xfit = np.linspace(log_feat_arr.min(), log_feat_arr.max(), 200)
+            yfit = np.polyval(coeffs, xfit)
+            ax_ll.plot(
+                xfit, yfit,
+                "k--", lw=1.3,
+                label=f"slope={slope:.3f}, int={intercept:.3f}"
+            )
+
+            r = float(np.corrcoef(log_feat_arr, log_steps_arr)[0, 1])
+
+            ax_ll.set_title(f"{feat_name}\nn={len(log_feat_arr)}, r={r:.3f}")
+            ax_ll.set_xlabel(f"log(|{feat_name}|) @ step {FEATURE_STEP}")
+            ax_ll.set_ylabel(f"log(steps to SOH \u2264 {SOH_STEP_TARGET})")
+            ax_ll.grid(True, alpha=0.3)
+            ax_ll.legend(loc="best", fontsize=8)
+
+            loglog_summary_rows.append({
+                "feature": feat_name,
+                "n": len(log_feat_arr),
+                "slope": slope,
+                "intercept": intercept,
+                "corr_r": r,
+            })
+
+        # hide unused axes
+        for j in range(len(candidate_loglog_features), len(axes_loggrid)):
+            axes_loggrid[j].axis("off")
+
+        fig_loggrid.suptitle(
+            f"Log-log relationships for all mean*/var* features\n"
+            f"x = log(|feature at step {FEATURE_STEP}|), "
+            f"y = log(steps to SOH \u2264 {SOH_STEP_TARGET})\n"
+            f"(farthest excluded, cells not reaching target excluded)",
+            y=0.995
+        )
+        fig_loggrid.tight_layout(rect=[0, 0, 1, 0.96])
+
+        # save summary table
+        df_loglog_summary = pd.DataFrame(loglog_summary_rows).sort_values(
+            by="corr_r", ascending=False, na_position="last"
+        )
+        df_loglog_summary.to_csv(interp_feat_dir / "_loglog_summary_mean_var_features.csv", index=False)
+
+        print("\nSaved log-log summary:")
+        print(interp_feat_dir / "_loglog_summary_mean_var_features.csv")
+        print(df_loglog_summary.to_string(index=False))
+
+        plt.show()
+
+    '''
     # --- Scatter plot (farthest excluded) ---
     log_feat_arr = []
     log_steps_arr = []
@@ -1450,6 +1619,7 @@ def main(
     fig_loglog.tight_layout()
 
     plt.show()
+    '''
 
     if cells_below_08:
         cells_below_08_sorted = sorted(cells_below_08, key=lambda x: x[1])
@@ -1467,7 +1637,7 @@ if __name__ == "__main__":
     out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
 
     # choose here:
-    INTERP_METHOD = "linear"   # "cubic" or "linear"
+    INTERP_METHOD = "cubic"   # "cubic" or "linear"
     THROUGHPUT_MAX = 8e7      # set to None if you do NOT want the limit
 
     main(

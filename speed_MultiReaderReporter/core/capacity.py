@@ -352,7 +352,7 @@ def extract_features(df,cell,cfg):
 
     features['CU_time'] = df["abs_time"].iloc[0]
     features['cap_dis'] = df_capa_dis["qstep"].iloc[-1]; features['cap_cha'] = df_capa_cha["qstep"].iloc[-1]
-    features['cap_ocv_dis'] = df_ocv_cha["qstep"].iloc[-1]; features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1]
+    features['cap_ocv_cha'] = df_ocv_cha["qstep"].iloc[-1]; features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1]
     # todo: make the input a list for shorter code
     # get the ICA info for feature extraction
     V_cha, dQdV_cha, Q_intcha = extract_ICA(df_ocv_cha, cell, cfg)
