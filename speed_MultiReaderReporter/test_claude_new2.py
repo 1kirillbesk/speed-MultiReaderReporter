@@ -24,13 +24,25 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import StratifiedShuffleSplit
-
+from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
+from analyze_linear_prediction import build_regression_table_cap93_and_var_at_thr
+import xgboost as xgb
+from sklearn.metrics import r2_score
+from analyze_3dim_time_2step import (
+    make_features_from_raw,
+    train_xgb_no_val_and_shap,
+    monte_carlo_best_conditions_for_distance,
+)
+from utils.combined_cost_search import train_model_var_dqc
 
 # =============================================================================
 # CONFIG
 # =============================================================================
-FEATURE_NAMES_FOR_DIST = ["mean_mid_cha", "mean_high_cha", "mean_pla_cha"]
+FEATURE_NAMES_FOR_DIST = [
+    "mean_mid_cha",
+    "mean_high_cha",
+    "mean_pla_cha",
+]
 
 interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
 out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
@@ -47,10 +59,12 @@ v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
 TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.96
+SOH_STEP_TARGET = 0.952
+FEATURE_STEP_LOGLOG = 6
 
 K_CLOSEST = 25
 K_FARTHEST = 20
+PRINT_CLOSEST_EXISTING = False
 
 # Choose interpolation method here
 INTERP_METHOD = "linear"      # options: "linear" or "cubic"
@@ -60,8 +74,12 @@ INTERP_FEATURES = [
     "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"
 ]
 
+EXP_CONDS = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
+exp_conditions = {}
+traj_by_cell_reg = {}
+
 # Model config
-FEATURE_COLS = ["SOH", "capacity", "mean_mid_cha", "mean_high_cha", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
+FEATURE_COLS = ["SOH", "mean_low_cha", "mean_mid_cha", "mean_pla_cha", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
 INPUT_STEPS = 7
 INPUT_FEATURES = len(FEATURE_COLS)
 
@@ -256,11 +274,13 @@ def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="line
     return out
 
 
-def features_at_soh(feat_dict, target_soh=0.995, method="linear"):
+def features_at_soh(feat_dict, target_soh=0.995, method="linear", feature_names=None):
     """
     Use capacity from feat_dict to get SOH per row,
     then interpolate each feature list to target_soh.
     """
+    if feature_names is None:
+        feature_names = FEATURE_NAMES_FOR_DIST
     cap = np.array(feat_dict["capacity"], dtype=float)
     cap = cap[np.isfinite(cap)]
 
@@ -268,9 +288,13 @@ def features_at_soh(feat_dict, target_soh=0.995, method="linear"):
         return None
 
     soh = cap / cap[0]
+    soh_min = np.nanmin(soh)
+    soh_max = np.nanmax(soh)
+    if not (soh_min <= target_soh <= soh_max):
+        return None
     out = {}
 
-    for fname in FEATURE_NAMES_FOR_DIST:
+    for fname in feature_names:
         vals = feat_dict.get(fname, [])
         if len(vals) == 0:
             return None
@@ -359,6 +383,14 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
 
     df = pd.read_csv(csv_file)
 
+    if all(c in df.columns for c in EXP_CONDS):
+        exp_row = df.loc[0, EXP_CONDS]
+        exp_conditions[cell_name] = exp_row.to_dict()
+    else:
+        missing_conds = [c for c in EXP_CONDS if c not in df.columns]
+        if missing_conds:
+            print(f"[WARN] {cell_name}: missing exp_conds {missing_conds}")
+
     if x_col not in df.columns or y_col not in df.columns or "Q_intVcha" not in df.columns:
         continue
 
@@ -394,7 +426,7 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
     df["Q_intVcha"] = df["Q_intVcha"].str.strip("[]").str.split().apply(lambda x: np.asarray(x, dtype=float))
 
     # calculate features
-    mean_low_cha, var_low_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=3.2, x_hi=v_1)
+    mean_low_cha, var_low_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=2, x_hi=v_2)
     mean_mid_cha, var_mid_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_1, x_hi=v_2)
     mean_high_cha, var_high_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_2, x_hi=v_3)
     mean_pla_cha, var_pla_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_3, x_hi=3.6)
@@ -408,11 +440,21 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
     df["time_weeks"] = (df["CU_time"] - t0).dt.total_seconds() / (7 * 24 * 3600)
     time_array = df["time_weeks"].to_numpy()
 
+    if ("throughput_sum" in df.columns) and ("var_dQ_c" in df.columns):
+        var_mid_cha_norm = np.abs(np.array(var_mid_cha, dtype=float)) / float(capacity.iloc[0])
+        traj_by_cell_reg[cell_name] = pd.DataFrame({
+            "weeks": df["time_weeks"],
+            "throughput_cum": throughput,
+            "var_dQ_c": df["var_dQ_c"],
+            "var_mid_cha": var_mid_cha_norm,
+            "capacity": capacity,
+        })
+
     feat_dict = {
         "mean_low_cha": np.array(mean_low_cha, dtype=float),
         "var_low_cha": np.array(var_low_cha, dtype=float),
         "mean_mid_cha": np.array(mean_mid_cha, dtype=float),
-        "var_mid_cha": np.array(var_mid_cha, dtype=float),
+        "var_mid_cha": np.abs(np.array(var_mid_cha, dtype=float)),
         "mean_high_cha": np.array(mean_high_cha, dtype=float),
         "var_high_cha": np.array(var_high_cha, dtype=float),
         "mean_pla_cha": np.array(mean_pla_cha, dtype=float),
@@ -441,6 +483,9 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
 ref_feat_at_soh = {}
 for cn, fd in results_ref.items():
     f = features_at_soh(fd, TARGET_SOH_FEATURES, method=INTERP_METHOD)
+    f_var_mid = features_at_soh(fd, TARGET_SOH_FEATURES, method=INTERP_METHOD, feature_names=["var_mid_cha"])
+    if f is not None and f_var_mid is not None:
+        f.update(f_var_mid)
     if f is not None:
         ref_feat_at_soh[cn] = f
         print(f"[REF  @ SOH={TARGET_SOH_FEATURES}] {cn}: {f}")
@@ -448,6 +493,9 @@ for cn, fd in results_ref.items():
 exp_feat_at_soh = {}
 for cn, fd in results.items():
     f = features_at_soh(fd, TARGET_SOH_FEATURES, method=INTERP_METHOD)
+    f_var_mid = features_at_soh(fd, TARGET_SOH_FEATURES, method=INTERP_METHOD, feature_names=["var_mid_cha"])
+    if f is not None and f_var_mid is not None:
+        f.update(f_var_mid)
     if f is not None:
         exp_feat_at_soh[cn] = f
 
@@ -514,7 +562,7 @@ interp_data = {}
 
 for cell_name, fd in all_results.items():
     cap = np.array(fd["capacity"], dtype=float)
-    time_arr = np.array(fd["Time"], dtype=float)
+    time_arr = np.array(fd["throughput"], dtype=float)
 
     if len(cap) < 3 or cap[0] == 0:
         continue
@@ -720,7 +768,463 @@ plt.show()
 
 
 # =============================================================================
-# STEP 6: MAKE DATASET FOR MODEL
+# STEP 5B: LOG-LOG RELATIONSHIPS (FEATURES vs STEPS TO TARGET SOH)
+# =============================================================================
+exclude_keys = {"time", "SOH", "capacity", "step_to_target"}
+candidate_loglog_features = set()
+for _, cell_dict in interp_data.items():
+    for key, val in cell_dict.items():
+        if key in exclude_keys:
+            continue
+        if isinstance(val, (list, np.ndarray)):
+            candidate_loglog_features.add(key)
+
+candidate_loglog_features = sorted(candidate_loglog_features)
+
+if len(candidate_loglog_features) == 0:
+    print("\n[WARN] No interpolated features found for log-log plots.")
+else:
+    n_feat = len(candidate_loglog_features)
+    ncols = 3
+    nrows = math.ceil(n_feat / ncols)
+
+    fig_loggrid, axes_loggrid = plt.subplots(
+        nrows, ncols,
+        figsize=(5.8 * ncols, 4.5 * nrows),
+        sharex=False,
+        sharey=False
+    )
+    axes_loggrid = np.array(axes_loggrid).ravel()
+
+    loglog_summary_rows = []
+
+    for i, feat_name in enumerate(candidate_loglog_features):
+        ax_ll = axes_loggrid[i]
+
+        log_feat_arr = []
+        log_steps_arr = []
+        color_arr = []
+
+        for cell_name, cell_dict in interp_data.items():
+            if cell_name in farthest_set:
+                continue
+            if feat_name not in cell_dict:
+                continue
+
+            step_to_target = cell_dict.get("step_to_target")
+            if step_to_target is None or not np.isfinite(step_to_target) or step_to_target <= 0:
+                continue
+
+            feat_vals = np.asarray(cell_dict[feat_name], dtype=float)
+            if len(feat_vals) <= FEATURE_STEP_LOGLOG:
+                continue
+
+            fv = feat_vals[FEATURE_STEP_LOGLOG]
+            if not np.isfinite(fv) or fv == 0.0:
+                continue
+
+            log_feat_arr.append(np.log(np.abs(fv)))
+            log_steps_arr.append(np.log(step_to_target))
+
+            if cell_name in ref_set:
+                color_arr.append("red")
+            elif cell_name in closest_set:
+                color_arr.append("orange")
+            else:
+                color_arr.append("blue")
+
+        log_feat_arr = np.array(log_feat_arr, dtype=float)
+        log_steps_arr = np.array(log_steps_arr, dtype=float)
+
+        if len(log_feat_arr) < 2:
+            ax_ll.set_title(f"{feat_name}\ninsufficient data")
+            ax_ll.grid(True, alpha=0.3)
+            loglog_summary_rows.append({
+                "feature": feat_name,
+                "n": len(log_feat_arr),
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+            })
+            continue
+
+        label_map_ll = {"blue": "other", "orange": "closest", "red": "refs"}
+        for cv in ["blue", "orange", "red"]:
+            m = np.array([c == cv for c in color_arr])
+            if not m.any():
+                continue
+            ax_ll.scatter(
+                log_feat_arr[m],
+                log_steps_arr[m],
+                c=cv,
+                s=35,
+                alpha=0.75,
+                edgecolors="k",
+                linewidths=0.35,
+                label=label_map_ll[cv],
+            )
+
+        coeffs = np.polyfit(log_feat_arr, log_steps_arr, 1)
+        slope = float(coeffs[0])
+        intercept = float(coeffs[1])
+
+        xfit = np.linspace(log_feat_arr.min(), log_feat_arr.max(), 200)
+        yfit = np.polyval(coeffs, xfit)
+        ax_ll.plot(
+            xfit, yfit,
+            "k--", lw=1.3,
+            label=f"slope={slope:.3f}, int={intercept:.3f}"
+        )
+
+        r = float(np.corrcoef(log_feat_arr, log_steps_arr)[0, 1])
+
+        ax_ll.set_title(f"{feat_name}\nn={len(log_feat_arr)}, r={r:.3f}")
+        ax_ll.set_xlabel(f"log(|{feat_name}|) @ step {FEATURE_STEP_LOGLOG}")
+        ax_ll.set_ylabel(f"log(steps to SOH <= {SOH_STEP_TARGET})")
+        ax_ll.grid(True, alpha=0.3)
+        ax_ll.legend(loc="best", fontsize=8)
+
+        loglog_summary_rows.append({
+            "feature": feat_name,
+            "n": len(log_feat_arr),
+            "slope": slope,
+            "intercept": intercept,
+            "corr_r": r,
+        })
+
+    for j in range(len(candidate_loglog_features), len(axes_loggrid)):
+        axes_loggrid[j].axis("off")
+
+    fig_loggrid.suptitle(
+        f"Log-log relationships for all interpolated features\n"
+        f"x = log(|feature at step {FEATURE_STEP_LOGLOG}|), "
+        f"y = log(steps to SOH <= {SOH_STEP_TARGET})\n"
+        f"(farthest excluded, cells not reaching target excluded)",
+        y=0.995
+    )
+    fig_loggrid.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_loggrid.savefig(out_fig_dir / "loglog_all_features.png", dpi=150)
+
+    df_loglog_summary = pd.DataFrame(loglog_summary_rows).sort_values(
+        by="corr_r", ascending=False, na_position="last"
+    )
+    df_loglog_summary.to_csv(out_fig_dir / "loglog_summary_all_features.csv", index=False)
+    print("\nSaved log-log summary:")
+    print(out_fig_dir / "loglog_summary_all_features.csv")
+    print(df_loglog_summary.to_string(index=False))
+    plt.show()
+
+
+
+# =============================================================================
+# STEP 6: XGBOOST + MONTE CARLO (no CNN training)
+# =============================================================================
+rows_exp, rows_ref = [], []
+
+# Build experimental rows (need exp_conds + features).
+for cn, feats in exp_feat_at_soh.items():
+    if cn not in exp_conditions:
+        continue
+    row = {"cell_name": cn, **exp_conditions[cn], **feats}
+    rows_exp.append(row)
+
+# Build reference rows using features only (exp_conds may be missing for refs).
+for cn, feats in ref_feat_at_soh.items():
+    rows_ref.append({"cell_name": cn, **feats})
+
+if not rows_exp:
+    print("[WARN] No experimental rows with exp_conds + features for XGB.")
+else:
+    df_exp = pd.DataFrame(rows_exp)
+    df_ref = pd.DataFrame(rows_ref)
+
+    # dist_feat based on windowed features
+    dist_df = pd.DataFrame(columns=["cell_name", "dist_feat", "best_ref"])
+    if not df_ref.empty:
+        ref_xyz = df_ref[FEATURE_NAMES_FOR_DIST].to_numpy(dtype=float)
+        exp_xyz = df_exp[FEATURE_NAMES_FOR_DIST].to_numpy(dtype=float)
+
+        all_xyz = np.vstack([ref_xyz, exp_xyz])
+        q25 = np.quantile(all_xyz, 0.25, axis=0)
+        q75 = np.quantile(all_xyz, 0.75, axis=0)
+        scale = np.maximum(q75 - q25, 1e-12)
+
+        ref_n = ref_xyz / scale
+        exp_n = exp_xyz / scale
+
+        dists = np.linalg.norm(exp_n[:, None, :] - ref_n[None, :, :], axis=2)
+        dist = np.min(dists, axis=1)
+        best_ref_idx = np.argmin(dists, axis=1)
+        best_ref_names = df_ref.iloc[best_ref_idx]["cell_name"].to_numpy()
+
+        dist_df = pd.DataFrame(
+            {
+                "cell_name": df_exp["cell_name"].to_numpy(),
+                "dist_feat": dist.astype(float),
+                "best_ref": best_ref_names,
+            }
+        ).sort_values("dist_feat").reset_index(drop=True)
+    else:
+        print("[WARN] No reference rows for dist_feat model.")
+
+    if PRINT_CLOSEST_EXISTING and not dist_df.empty:
+        print("\nTop 30 closest existing cells by feature distance to reference:")
+        top30 = dist_df.nsmallest(30, "dist_feat")
+        for _, row in top30.iterrows():
+            print(
+                f"  {row['cell_name']:40s}  dist={row['dist_feat']:.4f}  best_ref={row['best_ref']}"
+            )
+
+    # Train XGB models to predict features at SOH=0.995
+    def train_xgb_feature_model(df_in, target_col):
+        df_m = df_in.dropna(subset=[target_col]).copy()
+        if len(df_m) < 5:
+            print(f"[WARN] Not enough rows for {target_col} model.")
+            return None
+        X_feat, _ = make_features_from_raw(df_m, raw_conds=EXP_CONDS, drop_raw_soc=True)
+        y = pd.to_numeric(df_m[target_col], errors="coerce")
+        ok = ~y.isna() & np.isfinite(X_feat.to_numpy()).all(axis=1)
+        X_feat = X_feat.loc[ok].reset_index(drop=True)
+        y = y.loc[ok].to_numpy(dtype=float)
+        if len(y) < 5:
+            print(f"[WARN] Not enough valid rows for {target_col} model.")
+            return None
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_feat, y, test_size=0.2, random_state=42
+        )
+        model = xgb.XGBRegressor(
+            objective="reg:squarederror",
+            n_estimators=2000,
+            learning_rate=0.02,
+            max_depth=4,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.1,
+            reg_lambda=2.0,
+            min_child_weight=2.0,
+            gamma=0.1,
+            tree_method="hist",
+            random_state=42,
+        )
+        fit_kwargs = {
+            "eval_set": [(X_val, y_val)],
+            "eval_metric": "rmse",
+            "early_stopping_rounds": 100,
+            "verbose": False,
+        }
+        try:
+            model.fit(X_train, y_train, **fit_kwargs)
+        except TypeError:
+            # Older xgboost versions don't accept eval_metric/early_stopping in fit
+            model.fit(X_train, y_train)
+        y_hat_train = model.predict(X_train)
+        y_hat_val = model.predict(X_val)
+        print(
+            f"[XGB] {target_col}: train R2={r2_score(y_train, y_hat_train):.4f}, "
+            f"val R2={r2_score(y_val, y_hat_val):.4f}, n={len(y)}"
+        )
+        y_hat_all = model.predict(X_feat)
+        fig, ax = plt.subplots(figsize=(5.0, 4.5))
+        ax.scatter(y, y_hat_all, s=22, alpha=0.7, color="steelblue")
+        lo = float(min(y.min(), y_hat_all.min()))
+        hi = float(max(y.max(), y_hat_all.max()))
+        ax.plot([lo, hi], [lo, hi], "k--", lw=1.0)
+        ax.set_xlabel(f"true {target_col}")
+        ax.set_ylabel(f"pred {target_col}")
+        ax.set_title(f"XGB parity: {target_col}")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(out_fig_dir / f"xgb_parity_{target_col}.png", dpi=150)
+        plt.close(fig)
+        return model
+
+    print("\nTraining XGB models: exp_conds -> features at SOH=0.995")
+    feature_models = {}
+    for feat in FEATURE_NAMES_FOR_DIST:
+        feature_models[feat] = train_xgb_feature_model(df_exp, feat)
+
+    # Build regression table for var_mid_cha at throughput and train model
+    df_all = pd.DataFrame()
+    if traj_by_cell_reg:
+        all_cells = sorted(traj_by_cell_reg.keys())
+        df_all = build_regression_table_cap93_and_var_at_thr(
+            all_cells,
+            traj_by_cell_reg,
+            cap_col="capacity",
+            time_col="weeks",
+            thr_col="throughput_cum",
+            var_col="var_mid_cha",
+            throughput_target=500_000.0,
+        )
+
+    if df_all is None or df_all.empty:
+        print("[WARN] df_all empty; skipping var_mid_cha model + Monte Carlo.")
+    elif dist_df.empty:
+        print("[WARN] dist_df empty; skipping var_mid_cha model + Monte Carlo.")
+    else:
+        model_dist, _, _, _, _ = train_xgb_no_val_and_shap(
+            df_exp=df_exp,
+            dist_df=dist_df,
+            ref_names=REF_NAMES,
+        )
+        def train_xgb_var_mid_model(df_exp_local, df_reg_table, target_col="var_mid_cha_at_thr500k"):
+            needed = ["cell_name"] + EXP_CONDS
+            df_m = (
+                df_exp_local[needed]
+                .merge(df_reg_table[["cell_name", target_col]], on="cell_name", how="inner")
+            )
+            y = pd.to_numeric(df_m[target_col], errors="coerce")
+            X_feat, _ = make_features_from_raw(df_m, raw_conds=EXP_CONDS, drop_raw_soc=True)
+            ok = ~y.isna() & np.isfinite(X_feat.to_numpy()).all(axis=1)
+            X_feat = X_feat.loc[ok].reset_index(drop=True)
+            y = y.loc[ok].to_numpy(dtype=float)
+            if len(y) < 5:
+                print(f"[WARN] Not enough valid rows for {target_col} model.")
+                return None
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_feat, y, test_size=0.2, random_state=42
+            )
+            model = xgb.XGBRegressor(
+                objective="reg:squarederror",
+                n_estimators=2000,
+                learning_rate=0.02,
+                max_depth=4,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=0.1,
+                reg_lambda=2.0,
+                min_child_weight=2.0,
+                gamma=0.1,
+                tree_method="hist",
+                random_state=42,
+            )
+            fit_kwargs = {
+                "eval_set": [(X_val, y_val)],
+                "eval_metric": "rmse",
+                "early_stopping_rounds": 100,
+                "verbose": False,
+            }
+            try:
+                model.fit(X_train, y_train, **fit_kwargs)
+            except TypeError:
+                model.fit(X_train, y_train)
+
+            y_hat_train = model.predict(X_train)
+            y_hat_val = model.predict(X_val)
+            print(
+                f"[XGB] {target_col}: train R2={r2_score(y_train, y_hat_train):.4f}, "
+                f"val R2={r2_score(y_val, y_hat_val):.4f}, n={len(y)}"
+            )
+            y_hat_all = model.predict(X_feat)
+            fig, ax = plt.subplots(figsize=(5.0, 4.5))
+            ax.scatter(y, y_hat_all, s=22, alpha=0.7, color="steelblue")
+            lo = float(min(y.min(), y_hat_all.min()))
+            hi = float(max(y.max(), y_hat_all.max()))
+            ax.plot([lo, hi], [lo, hi], "k--", lw=1.0)
+            ax.set_xlabel(f"true {target_col}")
+            ax.set_ylabel(f"pred {target_col}")
+            ax.set_title(f"XGB parity: {target_col}")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            fig.savefig(out_fig_dir / f"xgb_parity_{target_col}.png", dpi=150)
+            plt.close(fig)
+            return model
+
+        model_var_mid = train_xgb_var_mid_model(
+            df_exp,
+            df_all,
+            target_col="var_mid_cha_at_thr500k",
+        )
+
+        # Predict var_mid_cha@thr500k for all experimental rows.
+        if model_var_mid is not None:
+            try:
+                X_var_all, _ = make_features_from_raw(df_exp, raw_conds=EXP_CONDS, drop_raw_soc=True)
+                ok_all = np.isfinite(X_var_all.to_numpy()).all(axis=1)
+                df_var_pred = df_exp.loc[ok_all, ["cell_name"]].copy()
+                pred_all = model_var_mid.predict(X_var_all.loc[ok_all])
+                df_var_pred["pred_var_mid_cha_at_thr500k"] = np.maximum(pred_all, 0.0)
+                if not dist_df.empty:
+                    top30_with_pred = (
+                        dist_df.merge(df_var_pred, on="cell_name", how="left")
+                        .nsmallest(30, "dist_feat")
+                    )
+                    print("\nTop 30 closest cells with predicted var_mid_cha_at_thr500k:")
+                    for _, row in top30_with_pred.iterrows():
+                        pred_val = row["pred_var_mid_cha_at_thr500k"]
+                        pred_str = f"{pred_val:.6g}" if np.isfinite(pred_val) else "nan"
+                        print(
+                            f"  {row['cell_name']:40s}  dist={row['dist_feat']:.4f}  "
+                            f"best_ref={row['best_ref']}  pred_var_mid_cha={pred_str}"
+                        )
+                top10_var = df_var_pred.nlargest(10, "pred_var_mid_cha_at_thr500k")
+                print("\nTop 10 cells by predicted var_mid_cha_at_thr500k:")
+                for _, row in top10_var.iterrows():
+                    print(f"  {row['cell_name']:40s}  pred_var_mid_cha={row['pred_var_mid_cha_at_thr500k']:.6g}")
+            except Exception as e:
+                print(f"[WARN] Could not rank predicted var_mid_cha: {e}")
+
+        df_dist = df_exp.merge(dist_df[["cell_name", "dist_feat"]], on="cell_name", how="inner")
+        df_dist = df_dist.dropna(subset=["dist_feat"]).copy()
+        if not df_dist.empty:
+            X_dist, _ = make_features_from_raw(df_dist, raw_conds=EXP_CONDS, drop_raw_soc=True)
+            y_dist = pd.to_numeric(df_dist["dist_feat"], errors="coerce")
+            ok = ~y_dist.isna() & np.isfinite(X_dist.to_numpy()).all(axis=1)
+            X_dist = X_dist.loc[ok].reset_index(drop=True)
+            y_dist = y_dist.loc[ok].to_numpy(dtype=float)
+            if len(y_dist) >= 3:
+                y_pred = model_dist.predict(X_dist)
+                fig, ax = plt.subplots(figsize=(5.0, 4.5))
+                ax.scatter(y_dist, y_pred, s=22, alpha=0.7, color="steelblue")
+                lo = float(min(y_dist.min(), y_pred.min()))
+                hi = float(max(y_dist.max(), y_pred.max()))
+                ax.plot([lo, hi], [lo, hi], "k--", lw=1.0)
+                ax.set_xlabel("true dist_feat")
+                ax.set_ylabel("pred dist_feat")
+                ax.set_title("XGB parity: dist_feat")
+                ax.grid(True, alpha=0.3)
+                fig.tight_layout()
+                fig.savefig(out_fig_dir / "xgb_parity_dist_feat.png", dpi=150)
+                plt.close(fig)
+
+        mc_all = monte_carlo_best_conditions_for_distance(
+            df_exp=df_exp,
+            model=model_dist,
+            ref_names=REF_NAMES,
+            n_samples_per_temp=100,
+            top_k=None,
+        )
+
+        if mc_all.empty:
+            print("[WARN] Monte Carlo search returned no candidates.")
+        else:
+            mc_all = mc_all.copy()
+            if model_var_mid is not None:
+                try:
+                    X_mc_feat, _ = make_features_from_raw(mc_all, raw_conds=EXP_CONDS, drop_raw_soc=True)
+                    ok_mc = np.isfinite(X_mc_feat.to_numpy()).all(axis=1)
+                    pred_var_mid = np.full(len(mc_all), np.nan, dtype=float)
+                    pred_var_mid[ok_mc] = np.maximum(
+                        model_var_mid.predict(X_mc_feat.loc[ok_mc]),
+                        0.0,
+                    )
+                    mc_all["pred_var_mid_cha_at_thr500k"] = pred_var_mid
+                except Exception as e:
+                    print(f"[WARN] Could not predict var_mid_cha for MC candidates: {e}")
+            mc_top = mc_all.nsmallest(30, "pred_dist_feat")
+
+            print("\nTop 30 Monte Carlo conditions by predicted dist_feat")
+            cols_show = EXP_CONDS + ["pred_dist_feat"]
+            if "pred_var_mid_cha_at_thr500k" in mc_top.columns:
+                cols_show.append("pred_var_mid_cha_at_thr500k")
+            cols_show = [c for c in cols_show if c in mc_top.columns]
+            print(mc_top[cols_show].to_string(index=False))
+
+            print("\nConditions only (top 30 by dist_feat):")
+            print(mc_top[EXP_CONDS].to_string(index=False))
+
+# =============================================================================
+# STEP 7: MAKE DATASET FOR MODEL (CNN)
 # =============================================================================
 print("Loading data from interp_data dictionary ...")
 

@@ -1728,7 +1728,7 @@ if __name__ == "__main__":
     out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
 
     # choose here:
-    INTERP_METHOD = "cubic"   # "cubic" or "linear"
+    INTERP_METHOD = "linear"   # "cubic" or "linear"
     THROUGHPUT_MAX = 8e7      # set to None if you do NOT want the limit
 
     main(
