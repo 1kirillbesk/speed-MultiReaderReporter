@@ -36,7 +36,7 @@ interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature
 out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
 out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
+REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
 
 x_col = "Vcha"
 y_col = "dQdVcha"
@@ -47,7 +47,7 @@ v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
 TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.956
+SOH_STEP_TARGET = 0.955
 
 K_CLOSEST = 25
 K_FARTHEST = 20
@@ -66,16 +66,16 @@ INPUT_STEPS = 7
 INPUT_FEATURES = len(FEATURE_COLS)
 
 TEST_NAMES = [
-    "SPEED_LW_reference_1",
-    "SPEED_LW_reference_2",
-    "SPEED_LW_reference_3",
+    "SPEED_LW_reference_4",
+    "SPEED_LW_reference_5",
+    "SPEED_LW_reference_6",
 ]
 
 EPOCHS = 500
 BATCH_SIZE = 16
 LR = 0.001
 DROPOUT = 0.1
-VALIDATION_SPLIT = 0.1
+VALIDATION_SPLIT = 0.2
 USE_VALIDATION = True
 N_SEEDS = 10
 
@@ -514,7 +514,7 @@ interp_data = {}
 
 for cell_name, fd in all_results.items():
     cap = np.array(fd["capacity"], dtype=float)
-    time_arr = np.array(fd["throughput"], dtype=float)
+    time_arr = np.array(fd["Time"], dtype=float)
 
     if len(cap) < 3 or cap[0] == 0:
         continue
@@ -788,8 +788,8 @@ X_train_all = combined_scaled[:len(train_X_list)]
 X_test = combined_scaled[len(train_X_list):]
 
 # log-transform target
-y_train_all = np.log(y_train_all)
-y_test = np.log(y_test)
+y_train_all = np.log(y_train_all/10)
+y_test = np.log(y_test/10)
 
 
 # =============================================================================
@@ -825,6 +825,7 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 # =============================================================================
 # STEP 9: TRAIN ENSEMBLE
 # =============================================================================
+np.random.seed(42)
 random_numbers = np.random.choice(range(0, 100), size=N_SEEDS, replace=False)
 y_pred_list = []
 
