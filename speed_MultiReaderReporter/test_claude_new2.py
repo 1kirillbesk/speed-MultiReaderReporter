@@ -59,12 +59,16 @@ v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
 TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.952
-FEATURE_STEP_LOGLOG = 6
+SOH_STEP_TARGET = 0.953
+FEATURE_STEP_LOGLOG = 7
+THROUGHPUT_FEATURE_LOGLOG = 500_000.0
+SOH_THROUGHPUT_TARGET = 0.955
 
-K_CLOSEST = 25
+K_CLOSEST = 20
 K_FARTHEST = 20
 PRINT_CLOSEST_EXISTING = False
+TOP_TEMPS = [40, 25, 15]
+TOP_PER_TEMP = 10
 
 # Choose interpolation method here
 INTERP_METHOD = "linear"      # options: "linear" or "cubic"
@@ -75,11 +79,18 @@ INTERP_FEATURES = [
 ]
 
 EXP_CONDS = ["soc_start", "soc_end", "c_rate_chg", "c_rate_dchg", "temp"]
+MC_ALLOWED_TEMP = np.array([15.0, 25.0, 40.0], dtype=float)
+MC_ALLOWED_SOC_START = np.arange(0, 90, 10, dtype=float)
+MC_ALLOWED_SOC_END = np.arange(30, 110, 10, dtype=float)
+MC_ALLOWED_C_RATE_CHG = np.arange(0.5, 1.75, 0.25, dtype=float)
+MC_ALLOWED_C_RATE_DCHG = np.arange(1, 3.25, 0.25, dtype=float)
+MC_MIN_SOC_DELTA = 10.0
+MC_SAMPLES_PER_TEMP = 100
 exp_conditions = {}
 traj_by_cell_reg = {}
 
 # Model config
-FEATURE_COLS = ["SOH", "mean_low_cha", "mean_mid_cha", "mean_pla_cha", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
+FEATURE_COLS = ["SOH", "capacity", "mean_low_cha", "mean_mid_cha", "mean_pla_cha", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
 INPUT_STEPS = 7
 INPUT_FEATURES = len(FEATURE_COLS)
 
@@ -90,7 +101,7 @@ TEST_NAMES = [
 ]
 
 EPOCHS = 500
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 LR = 0.001
 DROPOUT = 0.1
 VALIDATION_SPLIT = 0.2
@@ -327,6 +338,27 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+def select_lowest_distance_per_temp(df, temp_col="temp", dist_col="dist_feat", temps=None, n_per_temp=10):
+    if df is None or df.empty:
+        return df
+
+    if temps is None:
+        temps = TOP_TEMPS
+
+    out_parts = []
+    df_local = df.copy()
+    df_local[temp_col] = pd.to_numeric(df_local[temp_col], errors="coerce")
+
+    for temp in temps:
+        df_temp = df_local[df_local[temp_col] == float(temp)].nsmallest(n_per_temp, dist_col)
+        out_parts.append(df_temp)
+
+    if not out_parts:
+        return df_local.iloc[0:0].copy()
+
+    return pd.concat(out_parts, ignore_index=True)
+
+
 def create_balanced_val_split(X, y, val_fraction=0.2, bins=3):
     y = np.array(y)
     y_bins = pd.qcut(y, q=bins, labels=False, duplicates="drop")
@@ -524,17 +556,30 @@ if len(ref_feat_at_soh) > 0 and len(exp_feat_at_soh) > 0:
     dists = np.linalg.norm(exp_n[:, None, :] - ref_n[None, :, :], axis=2)
     dist_min = np.min(dists, axis=1)
 
-    k1 = min(K_CLOSEST, len(exp_names_list))
     k2 = min(K_FARTHEST, len(exp_names_list))
-    closest_idx = np.argsort(dist_min)[:k1]
     farthest_idx = np.argsort(dist_min)[-k2:]
-
-    closest_cellnames = [exp_names_list[i] for i in closest_idx]
     farthest_cellnames = [exp_names_list[i] for i in farthest_idx]
 
-    print(f"\nClosest {k1} cells:")
-    for i in closest_idx:
-        print(f"  {exp_names_list[i]:40s}  dist={dist_min[i]:.4f}")
+    closest_df = pd.DataFrame(
+        {
+            "cell_name": exp_names_list,
+            "temp": [exp_conditions.get(cn, {}).get("temp", np.nan) for cn in exp_names_list],
+            "dist_feat": dist_min.astype(float),
+        }
+    )
+    closest_df = select_lowest_distance_per_temp(
+        closest_df,
+        temps=TOP_TEMPS,
+        n_per_temp=TOP_PER_TEMP,
+    )
+    closest_cellnames = closest_df["cell_name"].tolist()
+
+    print(f"\nClosest {TOP_PER_TEMP} cells per temperature by feature distance:")
+    for temp in TOP_TEMPS:
+        temp_rows = closest_df[closest_df["temp"] == float(temp)]
+        print(f"  Temp {temp}:")
+        for _, row in temp_rows.iterrows():
+            print(f"    {row['cell_name']:36s}  dist={row['dist_feat']:.4f}")
 
     print(f"\nFarthest {k2} cells:")
     for i in farthest_idx:
@@ -796,18 +841,36 @@ else:
     )
     axes_loggrid = np.array(axes_loggrid).ravel()
 
+    fig_loggrid_closest, axes_loggrid_closest = plt.subplots(
+        nrows, ncols,
+        figsize=(5.8 * ncols, 4.5 * nrows),
+        sharex=False,
+        sharey=False
+    )
+    axes_loggrid_closest = np.array(axes_loggrid_closest).ravel()
+
+    fig_loggrid_farthest, axes_loggrid_farthest = plt.subplots(
+        nrows, ncols,
+        figsize=(5.8 * ncols, 4.5 * nrows),
+        sharex=False,
+        sharey=False
+    )
+    axes_loggrid_farthest = np.array(axes_loggrid_farthest).ravel()
+
     loglog_summary_rows = []
+    loglog_summary_rows_closest = []
+    loglog_summary_rows_farthest = []
 
     for i, feat_name in enumerate(candidate_loglog_features):
         ax_ll = axes_loggrid[i]
+        ax_ll_closest = axes_loggrid_closest[i]
+        ax_ll_farthest = axes_loggrid_farthest[i]
 
         log_feat_arr = []
         log_steps_arr = []
         color_arr = []
 
         for cell_name, cell_dict in interp_data.items():
-            if cell_name in farthest_set:
-                continue
             if feat_name not in cell_dict:
                 continue
 
@@ -830,11 +893,62 @@ else:
                 color_arr.append("red")
             elif cell_name in closest_set:
                 color_arr.append("orange")
+            elif cell_name in farthest_set:
+                color_arr.append("green")
             else:
                 color_arr.append("blue")
 
         log_feat_arr = np.array(log_feat_arr, dtype=float)
         log_steps_arr = np.array(log_steps_arr, dtype=float)
+        color_arr = np.array(color_arr, dtype=str)
+
+        ref_names_feat = []
+        ref_log_x_feat = []
+        ref_log_true_steps_feat = []
+        ref_true_steps_feat = []
+        for ref_name in REF_NAMES:
+            ref_cell = interp_data.get(ref_name)
+            if ref_cell is None or feat_name not in ref_cell:
+                continue
+            step_ref = ref_cell.get("step_to_target")
+            if step_ref is None or not np.isfinite(step_ref) or step_ref <= 0:
+                continue
+            feat_vals_ref = np.asarray(ref_cell[feat_name], dtype=float)
+            if len(feat_vals_ref) <= FEATURE_STEP_LOGLOG:
+                continue
+            fv_ref = feat_vals_ref[FEATURE_STEP_LOGLOG]
+            if not np.isfinite(fv_ref) or fv_ref == 0.0:
+                continue
+            ref_names_feat.append(ref_name)
+            ref_log_x_feat.append(np.log(np.abs(fv_ref)))
+            ref_log_true_steps_feat.append(np.log(float(step_ref)))
+            ref_true_steps_feat.append(float(step_ref))
+        ref_log_x_feat = np.array(ref_log_x_feat, dtype=float)
+        ref_log_true_steps_feat = np.array(ref_log_true_steps_feat, dtype=float)
+        ref_true_steps_feat = np.array(ref_true_steps_feat, dtype=float)
+        if len(ref_log_x_feat) > 0:
+            ax_ll_closest.scatter(
+                ref_log_x_feat,
+                ref_log_true_steps_feat,
+                c="red",
+                marker="*",
+                s=110,
+                alpha=0.9,
+                edgecolors="k",
+                linewidths=0.35,
+                label="refs true",
+            )
+            ax_ll_farthest.scatter(
+                ref_log_x_feat,
+                ref_log_true_steps_feat,
+                c="red",
+                marker="*",
+                s=110,
+                alpha=0.9,
+                edgecolors="k",
+                linewidths=0.35,
+                label="refs true",
+            )
 
         if len(log_feat_arr) < 2:
             ax_ll.set_title(f"{feat_name}\ninsufficient data")
@@ -846,11 +960,31 @@ else:
                 "intercept": np.nan,
                 "corr_r": np.nan,
             })
+
+            ax_ll_closest.set_title(f"{feat_name}\nclosest: insufficient data")
+            ax_ll_closest.grid(True, alpha=0.3)
+            loglog_summary_rows_closest.append({
+                "feature": feat_name,
+                "n": 0,
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+            })
+
+            ax_ll_farthest.set_title(f"{feat_name}\nfarthest: insufficient data")
+            ax_ll_farthest.grid(True, alpha=0.3)
+            loglog_summary_rows_farthest.append({
+                "feature": feat_name,
+                "n": 0,
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+            })
             continue
 
-        label_map_ll = {"blue": "other", "orange": "closest", "red": "refs"}
-        for cv in ["blue", "orange", "red"]:
-            m = np.array([c == cv for c in color_arr])
+        label_map_ll = {"blue": "other", "orange": "closest", "green": "farthest", "red": "refs"}
+        for cv in ["blue", "orange", "green", "red"]:
+            m = color_arr == cv
             if not m.any():
                 continue
             ax_ll.scatter(
@@ -892,26 +1026,436 @@ else:
             "corr_r": r,
         })
 
+        # additional fit: closest only
+        m_closest = color_arr == "orange"
+        n_closest = int(np.sum(m_closest))
+        if n_closest >= 2:
+            x_closest = log_feat_arr[m_closest]
+            y_closest = log_steps_arr[m_closest]
+            ax_ll_closest.scatter(
+                x_closest,
+                y_closest,
+                c="orange",
+                s=35,
+                alpha=0.8,
+                edgecolors="k",
+                linewidths=0.35,
+                label="closest",
+            )
+            coeffs_c = np.polyfit(x_closest, y_closest, 1)
+            slope_c = float(coeffs_c[0])
+            intercept_c = float(coeffs_c[1])
+            xfit_c = np.linspace(x_closest.min(), x_closest.max(), 200)
+            yfit_c = np.polyval(coeffs_c, xfit_c)
+            ax_ll_closest.plot(
+                xfit_c, yfit_c,
+                "k--", lw=1.3,
+                label=f"slope={slope_c:.3f}, int={intercept_c:.3f}"
+            )
+            r_c = float(np.corrcoef(x_closest, y_closest)[0, 1])
+            ax_ll_closest.set_title(f"{feat_name}\nclosest n={n_closest}, r={r_c:.3f}")
+            loglog_summary_rows_closest.append({
+                "feature": feat_name,
+                "n": n_closest,
+                "slope": slope_c,
+                "intercept": intercept_c,
+                "corr_r": r_c,
+            })
+            ax_ll_closest.legend(loc="best", fontsize=8)
+        else:
+            ax_ll_closest.set_title(f"{feat_name}\nclosest: insufficient data")
+            loglog_summary_rows_closest.append({
+                "feature": feat_name,
+                "n": n_closest,
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+            })
+        ax_ll_closest.set_xlabel(f"log(|{feat_name}|) @ step {FEATURE_STEP_LOGLOG}")
+        ax_ll_closest.set_ylabel(f"log(steps to SOH <= {SOH_STEP_TARGET})")
+        ax_ll_closest.grid(True, alpha=0.3)
+
+        # additional fit: farthest only
+        m_farthest = color_arr == "green"
+        n_farthest = int(np.sum(m_farthest))
+        if n_farthest >= 2:
+            x_farthest = log_feat_arr[m_farthest]
+            y_farthest = log_steps_arr[m_farthest]
+            ax_ll_farthest.scatter(
+                x_farthest,
+                y_farthest,
+                c="green",
+                s=35,
+                alpha=0.8,
+                edgecolors="k",
+                linewidths=0.35,
+                label="farthest",
+            )
+            coeffs_f = np.polyfit(x_farthest, y_farthest, 1)
+            slope_f = float(coeffs_f[0])
+            intercept_f = float(coeffs_f[1])
+            xfit_f = np.linspace(x_farthest.min(), x_farthest.max(), 200)
+            yfit_f = np.polyval(coeffs_f, xfit_f)
+            ax_ll_farthest.plot(
+                xfit_f, yfit_f,
+                "k--", lw=1.3,
+                label=f"slope={slope_f:.3f}, int={intercept_f:.3f}"
+            )
+            r_f = float(np.corrcoef(x_farthest, y_farthest)[0, 1])
+            ax_ll_farthest.set_title(f"{feat_name}\nfarthest n={n_farthest}, r={r_f:.3f}")
+            loglog_summary_rows_farthest.append({
+                "feature": feat_name,
+                "n": n_farthest,
+                "slope": slope_f,
+                "intercept": intercept_f,
+                "corr_r": r_f,
+            })
+            ax_ll_farthest.legend(loc="best", fontsize=8)
+        else:
+            ax_ll_farthest.set_title(f"{feat_name}\nfarthest: insufficient data")
+            loglog_summary_rows_farthest.append({
+                "feature": feat_name,
+                "n": n_farthest,
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+            })
+        ax_ll_farthest.set_xlabel(f"log(|{feat_name}|) @ step {FEATURE_STEP_LOGLOG}")
+        ax_ll_farthest.set_ylabel(f"log(steps to SOH <= {SOH_STEP_TARGET})")
+        ax_ll_farthest.grid(True, alpha=0.3)
+
     for j in range(len(candidate_loglog_features), len(axes_loggrid)):
         axes_loggrid[j].axis("off")
+        axes_loggrid_closest[j].axis("off")
+        axes_loggrid_farthest[j].axis("off")
 
     fig_loggrid.suptitle(
         f"Log-log relationships for all interpolated features\n"
         f"x = log(|feature at step {FEATURE_STEP_LOGLOG}|), "
         f"y = log(steps to SOH <= {SOH_STEP_TARGET})\n"
-        f"(farthest excluded, cells not reaching target excluded)",
+        f"(cells not reaching target excluded)",
         y=0.995
     )
     fig_loggrid.tight_layout(rect=[0, 0, 1, 0.96])
     fig_loggrid.savefig(out_fig_dir / "loglog_all_features.png", dpi=150)
 
+    fig_loggrid_closest.suptitle(
+        f"Log-log relationships for closest cells only\n"
+        f"x = log(|feature at step {FEATURE_STEP_LOGLOG}|), "
+        f"y = log(steps to SOH <= {SOH_STEP_TARGET})",
+        y=0.995
+    )
+    fig_loggrid_closest.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_loggrid_closest.savefig(out_fig_dir / "loglog_closest_features.png", dpi=150)
+
+    fig_loggrid_farthest.suptitle(
+        f"Log-log relationships for farthest cells only\n"
+        f"x = log(|feature at step {FEATURE_STEP_LOGLOG}|), "
+        f"y = log(steps to SOH <= {SOH_STEP_TARGET})",
+        y=0.995
+    )
+    fig_loggrid_farthest.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_loggrid_farthest.savefig(out_fig_dir / "loglog_farthest_features.png", dpi=150)
+
     df_loglog_summary = pd.DataFrame(loglog_summary_rows).sort_values(
         by="corr_r", ascending=False, na_position="last"
     )
     df_loglog_summary.to_csv(out_fig_dir / "loglog_summary_all_features.csv", index=False)
+    df_loglog_summary_closest = pd.DataFrame(loglog_summary_rows_closest).sort_values(
+        by="corr_r", ascending=False, na_position="last"
+    )
+    df_loglog_summary_closest.to_csv(out_fig_dir / "loglog_summary_closest_features.csv", index=False)
+    df_loglog_summary_farthest = pd.DataFrame(loglog_summary_rows_farthest).sort_values(
+        by="corr_r", ascending=False, na_position="last"
+    )
+    df_loglog_summary_farthest.to_csv(out_fig_dir / "loglog_summary_farthest_features.csv", index=False)
     print("\nSaved log-log summary:")
     print(out_fig_dir / "loglog_summary_all_features.csv")
     print(df_loglog_summary.to_string(index=False))
+    print(out_fig_dir / "loglog_summary_closest_features.csv")
+    print(df_loglog_summary_closest.to_string(index=False))
+    print(out_fig_dir / "loglog_summary_farthest_features.csv")
+    print(df_loglog_summary_farthest.to_string(index=False))
+    plt.show()
+
+
+# =============================================================================
+# STEP 5C: LOG-LOG @ THROUGHPUT=500k (FEATURE) VS THROUGHPUT @ SOH=0.955
+# =============================================================================
+if len(candidate_loglog_features) == 0:
+    print("\n[WARN] No interpolated features found for throughput-based log-log plots.")
+else:
+    n_feat_thr = len(candidate_loglog_features)
+    ncols_thr = 3
+    nrows_thr = math.ceil(n_feat_thr / ncols_thr)
+
+    fig_thr_all, axes_thr_all = plt.subplots(
+        nrows_thr, ncols_thr,
+        figsize=(5.8 * ncols_thr, 4.5 * nrows_thr),
+        sharex=False,
+        sharey=False
+    )
+    axes_thr_all = np.array(axes_thr_all).ravel()
+
+    fig_thr_closest, axes_thr_closest = plt.subplots(
+        nrows_thr, ncols_thr,
+        figsize=(5.8 * ncols_thr, 4.5 * nrows_thr),
+        sharex=False,
+        sharey=False
+    )
+    axes_thr_closest = np.array(axes_thr_closest).ravel()
+
+    fig_thr_farthest, axes_thr_farthest = plt.subplots(
+        nrows_thr, ncols_thr,
+        figsize=(5.8 * ncols_thr, 4.5 * nrows_thr),
+        sharex=False,
+        sharey=False
+    )
+    axes_thr_farthest = np.array(axes_thr_farthest).ravel()
+
+    summary_thr_all = []
+    summary_thr_closest = []
+    summary_thr_farthest = []
+
+    for i, feat_name in enumerate(candidate_loglog_features):
+        ax_all = axes_thr_all[i]
+        ax_close = axes_thr_closest[i]
+        ax_far = axes_thr_farthest[i]
+
+        log_x = []
+        log_y = []
+        color_arr = []
+
+        ref_log_x = []
+        ref_log_y_true = []
+
+        for cell_name, cell_dict in interp_data.items():
+            if feat_name not in cell_dict or "time" not in cell_dict or "SOH" not in cell_dict:
+                continue
+
+            t_arr = np.asarray(cell_dict["time"], dtype=float)
+            soh_arr = np.asarray(cell_dict["SOH"], dtype=float)
+            f_arr = np.asarray(cell_dict[feat_name], dtype=float)
+
+            n = min(len(t_arr), len(soh_arr), len(f_arr))
+            if n < 2:
+                continue
+
+            t_arr = t_arr[:n]
+            soh_arr = soh_arr[:n]
+            f_arr = f_arr[:n]
+
+            if THROUGHPUT_FEATURE_LOGLOG < np.nanmin(t_arr) or THROUGHPUT_FEATURE_LOGLOG > np.nanmax(t_arr):
+                continue
+
+            f_at_thr = interp_value_at_target(
+                x=t_arr,
+                y=f_arr,
+                x_target=THROUGHPUT_FEATURE_LOGLOG,
+                method="linear",
+            )
+            if f_at_thr is None or (not np.isfinite(f_at_thr)) or f_at_thr == 0.0:
+                continue
+
+            if np.nanmin(soh_arr) > SOH_THROUGHPUT_TARGET:
+                continue
+
+            thr_to_soh_target = interp_value_at_target(
+                x=soh_arr[::-1],
+                y=t_arr[::-1],
+                x_target=SOH_THROUGHPUT_TARGET,
+                method=INTERP_METHOD
+            )
+            if thr_to_soh_target is None or (not np.isfinite(thr_to_soh_target)) or thr_to_soh_target <= 0.0:
+                continue
+
+            lx = np.log(np.abs(f_at_thr))
+            ly = np.log(thr_to_soh_target)
+            if not np.isfinite(lx) or not np.isfinite(ly):
+                continue
+
+            log_x.append(lx)
+            log_y.append(ly)
+
+            if cell_name in ref_set:
+                color_arr.append("red")
+                ref_log_x.append(lx)
+                ref_log_y_true.append(ly)
+            elif cell_name in closest_set:
+                color_arr.append("orange")
+            elif cell_name in farthest_set:
+                color_arr.append("green")
+            else:
+                color_arr.append("blue")
+
+        log_x = np.array(log_x, dtype=float)
+        log_y = np.array(log_y, dtype=float)
+        color_arr = np.array(color_arr, dtype=str)
+        ref_log_x = np.array(ref_log_x, dtype=float)
+        ref_log_y_true = np.array(ref_log_y_true, dtype=float)
+
+        if len(log_x) < 2:
+            ax_all.set_title(f"{feat_name}\ninsufficient data")
+            ax_all.grid(True, alpha=0.3)
+            summary_thr_all.append({"feature": feat_name, "n": len(log_x), "slope": np.nan, "intercept": np.nan, "corr_r": np.nan})
+        else:
+            label_map = {"blue": "other", "orange": "closest", "green": "farthest", "red": "refs"}
+            for cv in ["blue", "orange", "green", "red"]:
+                m = color_arr == cv
+                if not m.any():
+                    continue
+                ax_all.scatter(
+                    log_x[m], log_y[m],
+                    c=cv, s=35, alpha=0.75,
+                    edgecolors="k", linewidths=0.35,
+                    label=label_map[cv],
+                )
+
+            coeffs_all = np.polyfit(log_x, log_y, 1)
+            slope_all = float(coeffs_all[0])
+            intercept_all = float(coeffs_all[1])
+            xfit_all = np.linspace(log_x.min(), log_x.max(), 200)
+            yfit_all = np.polyval(coeffs_all, xfit_all)
+            ax_all.plot(xfit_all, yfit_all, "k--", lw=1.3, label=f"slope={slope_all:.3f}, int={intercept_all:.3f}")
+            r_all = float(np.corrcoef(log_x, log_y)[0, 1])
+            ax_all.set_title(f"{feat_name}\nn={len(log_x)}, r={r_all:.3f}")
+            ax_all.legend(loc="best", fontsize=8)
+            summary_thr_all.append({
+                "feature": feat_name,
+                "n": len(log_x),
+                "slope": slope_all,
+                "intercept": intercept_all,
+                "corr_r": r_all,
+            })
+        ax_all.set_xlabel(f"log(|{feat_name}|) @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)}")
+        ax_all.set_ylabel(f"log(throughput to SOH <= {SOH_THROUGHPUT_TARGET})")
+        ax_all.grid(True, alpha=0.3)
+
+        if len(ref_log_x) > 0:
+            ax_close.scatter(
+                ref_log_x, ref_log_y_true,
+                c="red", marker="*",
+                s=110, alpha=0.9,
+                edgecolors="k", linewidths=0.35,
+                label="refs true",
+            )
+            ax_far.scatter(
+                ref_log_x, ref_log_y_true,
+                c="red", marker="*",
+                s=110, alpha=0.9,
+                edgecolors="k", linewidths=0.35,
+                label="refs true",
+            )
+
+        m_close = color_arr == "orange"
+        n_close = int(np.sum(m_close))
+        if n_close >= 2:
+            x_close = log_x[m_close]
+            y_close = log_y[m_close]
+            ax_close.scatter(
+                x_close, y_close,
+                c="orange", s=35, alpha=0.8,
+                edgecolors="k", linewidths=0.35,
+                label="closest",
+            )
+            coeffs_close = np.polyfit(x_close, y_close, 1)
+            slope_close = float(coeffs_close[0])
+            intercept_close = float(coeffs_close[1])
+            xfit_close = np.linspace(x_close.min(), x_close.max(), 200)
+            yfit_close = np.polyval(coeffs_close, xfit_close)
+            ax_close.plot(xfit_close, yfit_close, "k--", lw=1.3, label=f"slope={slope_close:.3f}, int={intercept_close:.3f}")
+            r_close = float(np.corrcoef(x_close, y_close)[0, 1])
+            ax_close.set_title(f"{feat_name}\nclosest n={n_close}, r={r_close:.3f}")
+            summary_thr_closest.append({
+                "feature": feat_name,
+                "n": n_close,
+                "slope": slope_close,
+                "intercept": intercept_close,
+                "corr_r": r_close,
+            })
+            ax_close.legend(loc="best", fontsize=8)
+        else:
+            ax_close.set_title(f"{feat_name}\nclosest: insufficient data")
+            summary_thr_closest.append({"feature": feat_name, "n": n_close, "slope": np.nan, "intercept": np.nan, "corr_r": np.nan})
+        ax_close.set_xlabel(f"log(|{feat_name}|) @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)}")
+        ax_close.set_ylabel(f"log(throughput to SOH <= {SOH_THROUGHPUT_TARGET})")
+        ax_close.grid(True, alpha=0.3)
+
+        m_far = color_arr == "green"
+        n_far = int(np.sum(m_far))
+        if n_far >= 2:
+            x_far = log_x[m_far]
+            y_far = log_y[m_far]
+            ax_far.scatter(
+                x_far, y_far,
+                c="green", s=35, alpha=0.8,
+                edgecolors="k", linewidths=0.35,
+                label="farthest",
+            )
+            coeffs_far = np.polyfit(x_far, y_far, 1)
+            slope_far = float(coeffs_far[0])
+            intercept_far = float(coeffs_far[1])
+            xfit_far = np.linspace(x_far.min(), x_far.max(), 200)
+            yfit_far = np.polyval(coeffs_far, xfit_far)
+            ax_far.plot(xfit_far, yfit_far, "k--", lw=1.3, label=f"slope={slope_far:.3f}, int={intercept_far:.3f}")
+            r_far = float(np.corrcoef(x_far, y_far)[0, 1])
+            ax_far.set_title(f"{feat_name}\nfarthest n={n_far}, r={r_far:.3f}")
+            summary_thr_farthest.append({
+                "feature": feat_name,
+                "n": n_far,
+                "slope": slope_far,
+                "intercept": intercept_far,
+                "corr_r": r_far,
+            })
+            ax_far.legend(loc="best", fontsize=8)
+        else:
+            ax_far.set_title(f"{feat_name}\nfarthest: insufficient data")
+            summary_thr_farthest.append({"feature": feat_name, "n": n_far, "slope": np.nan, "intercept": np.nan, "corr_r": np.nan})
+        ax_far.set_xlabel(f"log(|{feat_name}|) @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)}")
+        ax_far.set_ylabel(f"log(throughput to SOH <= {SOH_THROUGHPUT_TARGET})")
+        ax_far.grid(True, alpha=0.3)
+
+    for j in range(len(candidate_loglog_features), len(axes_thr_all)):
+        axes_thr_all[j].axis("off")
+        axes_thr_closest[j].axis("off")
+        axes_thr_farthest[j].axis("off")
+
+    fig_thr_all.suptitle(
+        f"Log-log: feature @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)} vs throughput to SOH={SOH_THROUGHPUT_TARGET}\n"
+        f"(raw feature values; cells must reach target SOH)",
+        y=0.995
+    )
+    fig_thr_all.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_thr_all.savefig(out_fig_dir / "loglog_thr500k_to_soh0955_all_features.png", dpi=150)
+
+    fig_thr_closest.suptitle(
+        f"Log-log: closest cells only, feature @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)} vs throughput to SOH={SOH_THROUGHPUT_TARGET}",
+        y=0.995
+    )
+    fig_thr_closest.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_thr_closest.savefig(out_fig_dir / "loglog_thr500k_to_soh0955_closest_features.png", dpi=150)
+
+    fig_thr_farthest.suptitle(
+        f"Log-log: farthest cells only, feature @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)} vs throughput to SOH={SOH_THROUGHPUT_TARGET}",
+        y=0.995
+    )
+    fig_thr_farthest.tight_layout(rect=[0, 0, 1, 0.96])
+    fig_thr_farthest.savefig(out_fig_dir / "loglog_thr500k_to_soh0955_farthest_features.png", dpi=150)
+
+    df_summary_thr_all = pd.DataFrame(summary_thr_all).sort_values(by="corr_r", ascending=False, na_position="last")
+    df_summary_thr_all.to_csv(out_fig_dir / "loglog_thr500k_to_soh0955_summary_all_features.csv", index=False)
+    df_summary_thr_closest = pd.DataFrame(summary_thr_closest).sort_values(by="corr_r", ascending=False, na_position="last")
+    df_summary_thr_closest.to_csv(out_fig_dir / "loglog_thr500k_to_soh0955_summary_closest_features.csv", index=False)
+    df_summary_thr_farthest = pd.DataFrame(summary_thr_farthest).sort_values(by="corr_r", ascending=False, na_position="last")
+    df_summary_thr_farthest.to_csv(out_fig_dir / "loglog_thr500k_to_soh0955_summary_farthest_features.csv", index=False)
+
+    print("\nSaved throughput-based log-log summary:")
+    print(out_fig_dir / "loglog_thr500k_to_soh0955_summary_all_features.csv")
+    print(df_summary_thr_all.to_string(index=False))
+    print(out_fig_dir / "loglog_thr500k_to_soh0955_summary_closest_features.csv")
+    print(df_summary_thr_closest.to_string(index=False))
+    print(out_fig_dir / "loglog_thr500k_to_soh0955_summary_farthest_features.csv")
+    print(df_summary_thr_farthest.to_string(index=False))
     plt.show()
 
 
@@ -939,7 +1483,7 @@ else:
     df_ref = pd.DataFrame(rows_ref)
 
     # dist_feat based on windowed features
-    dist_df = pd.DataFrame(columns=["cell_name", "dist_feat", "best_ref"])
+    dist_df = pd.DataFrame(columns=["cell_name", "temp", "dist_feat", "best_ref"])
     if not df_ref.empty:
         ref_xyz = df_ref[FEATURE_NAMES_FOR_DIST].to_numpy(dtype=float)
         exp_xyz = df_exp[FEATURE_NAMES_FOR_DIST].to_numpy(dtype=float)
@@ -960,6 +1504,7 @@ else:
         dist_df = pd.DataFrame(
             {
                 "cell_name": df_exp["cell_name"].to_numpy(),
+                "temp": pd.to_numeric(df_exp["temp"], errors="coerce").to_numpy(),
                 "dist_feat": dist.astype(float),
                 "best_ref": best_ref_names,
             }
@@ -968,12 +1513,19 @@ else:
         print("[WARN] No reference rows for dist_feat model.")
 
     if PRINT_CLOSEST_EXISTING and not dist_df.empty:
-        print("\nTop 30 closest existing cells by feature distance to reference:")
-        top30 = dist_df.nsmallest(30, "dist_feat")
-        for _, row in top30.iterrows():
-            print(
-                f"  {row['cell_name']:40s}  dist={row['dist_feat']:.4f}  best_ref={row['best_ref']}"
-            )
+        top_by_temp = select_lowest_distance_per_temp(
+            dist_df,
+            temps=TOP_TEMPS,
+            n_per_temp=TOP_PER_TEMP,
+        )
+        print(f"\nTop {TOP_PER_TEMP} closest existing cells per temperature by feature distance to reference:")
+        for temp in TOP_TEMPS:
+            temp_rows = top_by_temp[top_by_temp["temp"] == float(temp)]
+            print(f"  Temp {temp}:")
+            for _, row in temp_rows.iterrows():
+                print(
+                    f"    {row['cell_name']:36s}  dist={row['dist_feat']:.4f}  best_ref={row['best_ref']}"
+                )
 
     # Train XGB models to predict features at SOH=0.995
     def train_xgb_feature_model(df_in, target_col):
@@ -1145,18 +1697,23 @@ else:
                 pred_all = model_var_mid.predict(X_var_all.loc[ok_all])
                 df_var_pred["pred_var_mid_cha_at_thr500k"] = np.maximum(pred_all, 0.0)
                 if not dist_df.empty:
-                    top30_with_pred = (
+                    top_by_temp_with_pred = select_lowest_distance_per_temp(
                         dist_df.merge(df_var_pred, on="cell_name", how="left")
-                        .nsmallest(30, "dist_feat")
+                        ,
+                        temps=TOP_TEMPS,
+                        n_per_temp=TOP_PER_TEMP,
                     )
-                    print("\nTop 30 closest cells with predicted var_mid_cha_at_thr500k:")
-                    for _, row in top30_with_pred.iterrows():
-                        pred_val = row["pred_var_mid_cha_at_thr500k"]
-                        pred_str = f"{pred_val:.6g}" if np.isfinite(pred_val) else "nan"
-                        print(
-                            f"  {row['cell_name']:40s}  dist={row['dist_feat']:.4f}  "
-                            f"best_ref={row['best_ref']}  pred_var_mid_cha={pred_str}"
-                        )
+                    print(f"\nTop {TOP_PER_TEMP} closest cells per temperature with predicted var_mid_cha_at_thr500k:")
+                    for temp in TOP_TEMPS:
+                        temp_rows = top_by_temp_with_pred[top_by_temp_with_pred["temp"] == float(temp)]
+                        print(f"  Temp {temp}:")
+                        for _, row in temp_rows.iterrows():
+                            pred_val = row["pred_var_mid_cha_at_thr500k"]
+                            pred_str = f"{pred_val:.6g}" if np.isfinite(pred_val) else "nan"
+                            print(
+                                f"    {row['cell_name']:36s}  dist={row['dist_feat']:.4f}  "
+                                f"best_ref={row['best_ref']}  pred_var_mid_cha={pred_str}"
+                            )
                 top10_var = df_var_pred.nlargest(10, "pred_var_mid_cha_at_thr500k")
                 print("\nTop 10 cells by predicted var_mid_cha_at_thr500k:")
                 for _, row in top10_var.iterrows():
@@ -1164,7 +1721,7 @@ else:
             except Exception as e:
                 print(f"[WARN] Could not rank predicted var_mid_cha: {e}")
 
-        df_dist = df_exp.merge(dist_df[["cell_name", "dist_feat"]], on="cell_name", how="inner")
+        df_dist = df_exp.merge(dist_df[["cell_name", "temp", "dist_feat"]], on=["cell_name", "temp"], how="inner")
         df_dist = df_dist.dropna(subset=["dist_feat"]).copy()
         if not df_dist.empty:
             X_dist, _ = make_features_from_raw(df_dist, raw_conds=EXP_CONDS, drop_raw_soc=True)
@@ -1191,8 +1748,14 @@ else:
             df_exp=df_exp,
             model=model_dist,
             ref_names=REF_NAMES,
-            n_samples_per_temp=100,
+            n_samples_per_temp=MC_SAMPLES_PER_TEMP,
             top_k=None,
+            allowed_temp=MC_ALLOWED_TEMP,
+            allowed_soc_start=MC_ALLOWED_SOC_START,
+            allowed_soc_end=MC_ALLOWED_SOC_END,
+            allowed_cur_cha=MC_ALLOWED_C_RATE_CHG,
+            allowed_cur_dis=MC_ALLOWED_C_RATE_DCHG,
+            min_soc_delta=MC_MIN_SOC_DELTA,
         )
 
         if mc_all.empty:
@@ -1211,17 +1774,35 @@ else:
                     mc_all["pred_var_mid_cha_at_thr500k"] = pred_var_mid
                 except Exception as e:
                     print(f"[WARN] Could not predict var_mid_cha for MC candidates: {e}")
-            mc_top = mc_all.nsmallest(30, "pred_dist_feat")
+            mc_top = select_lowest_distance_per_temp(
+                mc_all,
+                temp_col="temp",
+                dist_col="pred_dist_feat",
+                temps=TOP_TEMPS,
+                n_per_temp=TOP_PER_TEMP,
+            )
 
-            print("\nTop 30 Monte Carlo conditions by predicted dist_feat")
+            print(f"\nTop {TOP_PER_TEMP} Monte Carlo conditions per temperature by predicted dist_feat")
             cols_show = EXP_CONDS + ["pred_dist_feat"]
             if "pred_var_mid_cha_at_thr500k" in mc_top.columns:
                 cols_show.append("pred_var_mid_cha_at_thr500k")
             cols_show = [c for c in cols_show if c in mc_top.columns]
-            print(mc_top[cols_show].to_string(index=False))
+            for temp in TOP_TEMPS:
+                temp_rows = mc_top[pd.to_numeric(mc_top["temp"], errors="coerce") == float(temp)]
+                print(f"  Temp {temp}:")
+                if temp_rows.empty:
+                    print("    [none]")
+                else:
+                    print(temp_rows[cols_show].to_string(index=False))
 
-            print("\nConditions only (top 30 by dist_feat):")
-            print(mc_top[EXP_CONDS].to_string(index=False))
+            print(f"\nConditions only (top {TOP_PER_TEMP} per temperature by dist_feat):")
+            for temp in TOP_TEMPS:
+                temp_rows = mc_top[pd.to_numeric(mc_top["temp"], errors="coerce") == float(temp)]
+                print(f"  Temp {temp}:")
+                if temp_rows.empty:
+                    print("    [none]")
+                else:
+                    print(temp_rows[EXP_CONDS].to_string(index=False))
 
 # =============================================================================
 # STEP 7: MAKE DATASET FOR MODEL (CNN)

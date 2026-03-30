@@ -150,6 +150,12 @@ def monte_carlo_best_conditions_for_distance(
     n_samples_per_temp: int = 200,
     top_k: int | None = 20,
     random_state: int = 42,
+    allowed_temp: np.ndarray | None = None,
+    allowed_soc_start: np.ndarray | None = None,
+    allowed_soc_end: np.ndarray | None = None,
+    allowed_cur_cha: np.ndarray | None = None,
+    allowed_cur_dis: np.ndarray | None = None,
+    min_soc_delta: float = 10.0,
 ) -> pd.DataFrame:
     """
     Monte Carlo search over RAW conditions (with your discrete constraints),
@@ -162,7 +168,7 @@ def monte_carlo_best_conditions_for_distance(
       - soc_end in {20..100 step 10}
     Constraints:
       - soc_end > soc_start
-      - soc_end - soc_start > 10  (=> at least 20 with 10-step grids)
+      - soc_end - soc_start > min_soc_delta
     Other raws sampled uniformly within observed min/max (non-reference).
     """
     rng = np.random.default_rng(random_state)
@@ -183,14 +189,34 @@ def monte_carlo_best_conditions_for_distance(
             raise ValueError(f"Non-finite bounds for {c}: lo={lo}, hi={hi}")
         bounds[c] = (lo, hi)
 
-    allowed_temp = np.array([15.0, 25.0, 40.0])
-    allowed_soc_start = np.arange(0, 80, 10, dtype=float)      # 0..60
-    allowed_soc_end = np.arange(20, 110, 10, dtype=float)      # 20..100
-    allowed_cur_cha = np.arange(0.5, 1.75, 0.25, dtype=float)
-    allowed_cur_dis = np.arange(1, 3.25, 0.25, dtype=float)
+    allowed_temp = (
+        np.asarray(allowed_temp, dtype=float)
+        if allowed_temp is not None
+        else np.array([15.0, 25.0, 40.0], dtype=float)
+    )
+    allowed_soc_start = (
+        np.asarray(allowed_soc_start, dtype=float)
+        if allowed_soc_start is not None
+        else np.arange(0, 80, 10, dtype=float)
+    )
+    allowed_soc_end = (
+        np.asarray(allowed_soc_end, dtype=float)
+        if allowed_soc_end is not None
+        else np.arange(20, 110, 10, dtype=float)
+    )
+    allowed_cur_cha = (
+        np.asarray(allowed_cur_cha, dtype=float)
+        if allowed_cur_cha is not None
+        else np.arange(0.5, 1.75, 0.25, dtype=float)
+    )
+    allowed_cur_dis = (
+        np.asarray(allowed_cur_dis, dtype=float)
+        if allowed_cur_dis is not None
+        else np.arange(1, 3.25, 0.25, dtype=float)
+    )
 
     valid_pairs = np.array(
-        [(s0, s1) for s0 in allowed_soc_start for s1 in allowed_soc_end if (s1 - s0) > 10],
+        [(s0, s1) for s0 in allowed_soc_start for s1 in allowed_soc_end if (s1 - s0) > float(min_soc_delta)],
         dtype=float,
     )
     if len(valid_pairs) == 0:
