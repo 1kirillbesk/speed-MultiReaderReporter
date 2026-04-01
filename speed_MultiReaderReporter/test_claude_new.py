@@ -401,7 +401,7 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
 
     capacity = df["Q_intVcha"].apply(lambda x: x[-1])
     SOH = capacity / capacity.iloc[0]
-    throughput = np.cumsum(np.array(df["throughput_sum"]))
+    throughput = np.cumsum(np.array(df["throughput_sum"], dtype=float)) / 3600.0
 
     df["CU_time"] = pd.to_datetime(df["CU_time"])
     t0 = df["CU_time"].iloc[0]

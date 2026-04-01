@@ -59,10 +59,10 @@ v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
 TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.953
+SOH_STEP_TARGET = 0.952
 FEATURE_STEP_LOGLOG = 7
-THROUGHPUT_FEATURE_LOGLOG = 500_000.0
-SOH_THROUGHPUT_TARGET = 0.955
+THROUGHPUT_FEATURE_LOGLOG = 2000000.0 / 3600.0 / 3.4
+SOH_THROUGHPUT_TARGET = 0.951
 
 K_CLOSEST = 20
 K_FARTHEST = 20
@@ -91,7 +91,7 @@ traj_by_cell_reg = {}
 
 # Model config
 FEATURE_COLS = ["SOH", "capacity", "mean_low_cha", "mean_mid_cha", "mean_pla_cha", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
-INPUT_STEPS = 7
+INPUT_STEPS = 8
 INPUT_FEATURES = len(FEATURE_COLS)
 
 TEST_NAMES = [
@@ -465,7 +465,7 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
 
     capacity = df["Q_intVcha"].apply(lambda x: x[-1])
     SOH = capacity / capacity.iloc[0]
-    throughput = np.cumsum(np.array(df["throughput_sum"]))
+    throughput = np.cumsum(np.array(df["throughput_sum"], dtype=float)) / 3600.0
 
     df["CU_time"] = pd.to_datetime(df["CU_time"])
     t0 = df["CU_time"].iloc[0]
@@ -1606,7 +1606,7 @@ else:
             time_col="weeks",
             thr_col="throughput_cum",
             var_col="var_mid_cha",
-            throughput_target=500_000.0,
+            throughput_target=500_000.0 / 3600.0,
         )
 
     if df_all is None or df_all.empty:
