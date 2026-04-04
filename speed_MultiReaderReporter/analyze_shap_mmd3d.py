@@ -316,7 +316,7 @@ def main(dir_path: Path, out_dir: Path):
 
     # You asked for these semantics:
     target_soh_features = 0.995   # used for WASSERSTEIN window (SOH_hi -> this)
-    target_soh_plot = 0.975       # used for plotting interpolation/grid
+    target_soh_plot = 0.98       # used for plotting interpolation/grid
 
     # ---- Choose 2D or 3D by editing this list ----
     # 2D example:
