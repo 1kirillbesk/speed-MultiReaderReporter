@@ -4,7 +4,7 @@ import pickle
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from core.model import RunRecord
+from speed_MultiReaderReporter.core.model import RunRecord
 
 def _load_pickle_any(path: Path):
     """Try pandas-aware unpickling, fallback to raw pickle."""

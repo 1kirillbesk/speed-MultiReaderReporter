@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 
-from core.model import RunRecord
+from speed_MultiReaderReporter.core.model import RunRecord
 
 # --- small helpers ---
 def _to_abs_time_from_secs_or_datenum(t: np.ndarray) -> pd.Series:
