@@ -32,10 +32,10 @@ from sklearn.model_selection import StratifiedShuffleSplit
 # =============================================================================
 FEATURE_NAMES_FOR_DIST = ["mean_mid_cha", "mean_high_cha", "mean_pla_cha"]
 
-# interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
-# out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
-interp_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-out_fig_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
+interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
+out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
+# nterp_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
+# ut_fig_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
 out_fig_dir.mkdir(parents=True, exist_ok=True)
 
 REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
@@ -49,7 +49,7 @@ v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
 TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.96
+SOH_STEP_TARGET = 0.952
 
 K_CLOSEST = 25
 K_FARTHEST = 20
