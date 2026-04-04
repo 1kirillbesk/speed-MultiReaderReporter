@@ -1322,6 +1322,112 @@ def main(
     fig_soc_w.tight_layout()
     fig_soc_t.tight_layout()
 
+    def _build_three_groups(series: pd.Series, labels: tuple[str, str, str] = ("Low", "Mid", "High")):
+        s = pd.to_numeric(series, errors="coerce")
+        if s.dropna().nunique() < 3:
+            return None
+        try:
+            grp = pd.qcut(s, q=3, labels=list(labels), duplicates="drop")
+            if int(grp.cat.categories.size) < 3:
+                return None
+        except Exception:
+            lo = float(np.nanmin(s.to_numpy(dtype=float)))
+            hi = float(np.nanmax(s.to_numpy(dtype=float)))
+            if (not np.isfinite(lo)) or (not np.isfinite(hi)) or lo == hi:
+                return None
+            grp = pd.cut(
+                s,
+                bins=np.linspace(lo, hi, 4),
+                labels=list(labels),
+                include_lowest=True,
+            )
+        return grp
+
+    def _plot_grouped_trajectories(
+        group_series: pd.Series,
+        title_name: str,
+        label_prefix: str,
+    ):
+        group_labels = ["Low", "Mid", "High"]
+        group_colors = {"Low": "red", "Mid": "green", "High": "blue"}
+
+        fig_grp, ax_grp = plt.subplots(figsize=(9, 5))
+        fig_grp_w, ax_grp_w = plt.subplots(figsize=(9, 5))
+        fig_grp_t, ax_grp_t = plt.subplots(figsize=(9, 5))
+
+        added_labels = {g: False for g in group_labels}
+
+        for _, row in df_exp.iterrows():
+            cn = row["cell_name"]
+            grp = group_series.loc[row.name] if row.name in group_series.index else np.nan
+            if pd.isna(grp):
+                continue
+
+            grp_name = str(grp)
+            if grp_name not in group_colors:
+                continue
+
+            color = group_colors[grp_name]
+            label = f"{label_prefix} {grp_name}" if not added_labels[grp_name] else None
+
+            traj_w = traj_by_cell_weeks.get(cn)
+            if traj_w is not None:
+                ax_grp.plot(traj_w["SOH"], color=color, alpha=0.8, linewidth=1.0, label=label)
+                ax_grp_w.plot(traj_w["weeks"], traj_w["SOH"], color=color, alpha=0.8, linewidth=1.0, label=label)
+
+            traj_t = traj_by_cell_thr.get(cn)
+            if traj_t is not None:
+                ax_grp_t.plot(traj_t["throughput_cum"], traj_t["SOH"], color=color, alpha=0.8, linewidth=1.0, label=label)
+
+            if label is not None:
+                added_labels[grp_name] = True
+
+        for ref_name in REF_NAMES:
+            traj_w = traj_by_cell_weeks.get(ref_name)
+            if traj_w is not None:
+                ax_grp.plot(traj_w["SOH"], color="black", linestyle="--", alpha=0.9, linewidth=1.8)
+                ax_grp_w.plot(traj_w["weeks"], traj_w["SOH"], color="black", linestyle="--", alpha=0.9, linewidth=1.8)
+            traj_t = traj_by_cell_thr.get(ref_name)
+            if traj_t is not None:
+                ax_grp_t.plot(traj_t["throughput_cum"], traj_t["SOH"], color="black", linestyle="--", alpha=0.9, linewidth=1.8)
+
+        for a, xl, title_suffix in [
+            (ax_grp, "index", "index-based"),
+            (ax_grp_w, "weeks", "weeks-based"),
+            (ax_grp_t, "throughput_cum", "throughput-based"),
+        ]:
+            a.set_xlabel(xl)
+            a.set_ylabel("SOH")
+            a.set_title(f"SOH trajectories by {title_name} (red=low, blue=high) [{title_suffix}]")
+            a.set_ylim(0.8, 1.1)
+            a.grid(True, alpha=0.3)
+            a.legend(loc="best")
+
+        fig_grp.tight_layout()
+        fig_grp_w.tight_layout()
+        fig_grp_t.tight_layout()
+
+    # Additional grouped plots: temperature and charging current
+    temp_group = _build_three_groups(df_exp["temp"])
+    if temp_group is None:
+        print("[WARN] Temperature has fewer than 3 valid groups; skipped temperature-grouped plots.")
+    else:
+        _plot_grouped_trajectories(
+            group_series=temp_group,
+            title_name="temperature",
+            label_prefix="temp",
+        )
+
+    chg_group = _build_three_groups(df_exp["c_rate_chg"])
+    if chg_group is None:
+        print("[WARN] Charging current has fewer than 3 valid groups; skipped charging-current-grouped plots.")
+    else:
+        _plot_grouped_trajectories(
+            group_series=chg_group,
+            title_name="charging current",
+            label_prefix="c_rate_chg",
+        )
+
     SOH_STEP_TARGET = 0.96
     FEATURE_STEP = 16
 

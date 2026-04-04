@@ -8,6 +8,7 @@ import ast
 import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
+from scipy.stats import gaussian_kde
 
 from core.capacity import *
 
@@ -741,7 +742,6 @@ for cell_name, cell_dict in interp_data.items():
 # =============================================================================
 PLOT_FEATURES = [
     "SOH",
-    "capacity",
     "mean_low_cha", "mean_mid_cha", "mean_high_cha", "mean_pla_cha",
     "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha",
 ]
@@ -810,6 +810,47 @@ fig.suptitle(
 fig.tight_layout(rect=[0, 0, 1, 0.95])
 fig.savefig(out_fig_dir / f"all_interpolated_features_subplots_{INTERP_METHOD}.png", dpi=150)
 plt.show()
+
+# Single plot: distribution of initial capacity (histogram + density curve)
+initial_capacities = []
+for cell_name, fd in all_results.items():
+    cap = np.asarray(fd.get("capacity", []), dtype=float)
+    if len(cap) == 0 or not np.isfinite(cap[0]):
+        continue
+    if float(cap[0]) < 1.0:
+        continue
+    initial_capacities.append(float(cap[0]))
+
+if len(initial_capacities) > 0:
+    init_caps = np.asarray(initial_capacities, dtype=float)
+
+    fig_capdist, ax_capdist = plt.subplots(figsize=(8, 5))
+    ax_capdist.hist(
+        init_caps,
+        bins="auto",
+        density=True,
+        alpha=0.55,
+        color="steelblue",
+        edgecolor="white",
+        label=f"Histogram (n={len(init_caps)})",
+    )
+
+    if len(init_caps) >= 2 and float(np.nanstd(init_caps)) > 0.0:
+        x_kde = np.linspace(float(np.nanmin(init_caps)), float(np.nanmax(init_caps)), 300)
+        kde = gaussian_kde(init_caps)
+        y_kde = kde(x_kde)
+        ax_capdist.plot(x_kde, y_kde, color="darkorange", linewidth=2.2, label="Density curve (KDE)")
+
+    ax_capdist.set_xlabel("Initial capacity")
+    ax_capdist.set_ylabel("Density")
+    ax_capdist.set_title("Distribution of initial capacity")
+    ax_capdist.grid(True, alpha=0.3)
+    ax_capdist.legend(loc="best")
+    fig_capdist.tight_layout()
+    fig_capdist.savefig(out_fig_dir / "initial_capacity_distribution.png", dpi=150)
+    plt.show()
+else:
+    print("[WARN] No valid initial capacity values found for distribution plot.")
 
 
 # =============================================================================
