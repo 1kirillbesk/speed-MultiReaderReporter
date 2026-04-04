@@ -11,8 +11,8 @@ import pandas as pd
 import numpy as np
 from typing import Tuple
 from scipy.interpolate import CubicSpline
-from utils.combined_cost_search import run_combined_search
 from analyze_linear_prediction import build_regression_table_cap93_and_var_at_thr
+from utils.combined_cost_search import train_model_var_dqc
 
 
 # 3D plotting
@@ -147,13 +147,20 @@ def monte_carlo_best_conditions_for_distance(
     model: xgb.XGBRegressor,
     ref_names: list[str],
     raw_conds: list[str] = RAW_CONDS_DEFAULT,
-    n_samples: int = 500,
-    top_k: int = 20,
+    n_samples_per_temp: int = 200,
+    top_k: int | None = 20,
     random_state: int = 42,
+    allowed_temp: np.ndarray | None = None,
+    allowed_soc_start: np.ndarray | None = None,
+    allowed_soc_end: np.ndarray | None = None,
+    allowed_cur_cha: np.ndarray | None = None,
+    allowed_cur_dis: np.ndarray | None = None,
+    min_soc_delta: float = 10.0,
 ) -> pd.DataFrame:
     """
     Monte Carlo search over RAW conditions (with your discrete constraints),
-    then engineer SAME features as training, predict, and return smallest top_k.
+    n_samples_per_temp per temperature, then engineer SAME features as training,
+    predict, and return smallest top_k.
 
     Discrete:
       - temp in {15,25,40}
@@ -161,7 +168,7 @@ def monte_carlo_best_conditions_for_distance(
       - soc_end in {20..100 step 10}
     Constraints:
       - soc_end > soc_start
-      - soc_end - soc_start > 10  (=> at least 20 with 10-step grids)
+      - soc_end - soc_start > min_soc_delta
     Other raws sampled uniformly within observed min/max (non-reference).
     """
     rng = np.random.default_rng(random_state)
@@ -182,36 +189,60 @@ def monte_carlo_best_conditions_for_distance(
             raise ValueError(f"Non-finite bounds for {c}: lo={lo}, hi={hi}")
         bounds[c] = (lo, hi)
 
-    allowed_temp = np.array([15.0, 25.0, 40.0])
-    allowed_soc_start = np.arange(0, 70, 10, dtype=float)      # 0..60
-    allowed_soc_end = np.arange(20, 110, 10, dtype=float)      # 20..100
-    allowed_cur_cha = np.arange(0.5, 1.75, 0.25, dtype=float)
-    allowed_cur_dis = np.arange(1, 3.25, 0.25, dtype=float)
+    allowed_temp = (
+        np.asarray(allowed_temp, dtype=float)
+        if allowed_temp is not None
+        else np.array([15.0, 25.0, 40.0], dtype=float)
+    )
+    allowed_soc_start = (
+        np.asarray(allowed_soc_start, dtype=float)
+        if allowed_soc_start is not None
+        else np.arange(0, 80, 10, dtype=float)
+    )
+    allowed_soc_end = (
+        np.asarray(allowed_soc_end, dtype=float)
+        if allowed_soc_end is not None
+        else np.arange(20, 110, 10, dtype=float)
+    )
+    allowed_cur_cha = (
+        np.asarray(allowed_cur_cha, dtype=float)
+        if allowed_cur_cha is not None
+        else np.arange(0.5, 1.75, 0.25, dtype=float)
+    )
+    allowed_cur_dis = (
+        np.asarray(allowed_cur_dis, dtype=float)
+        if allowed_cur_dis is not None
+        else np.arange(1, 3.25, 0.25, dtype=float)
+    )
 
     valid_pairs = np.array(
-        [(s0, s1) for s0 in allowed_soc_start for s1 in allowed_soc_end if (s1 - s0) > 10],
+        [(s0, s1) for s0 in allowed_soc_start for s1 in allowed_soc_end if (s1 - s0) > float(min_soc_delta)],
         dtype=float,
     )
     if len(valid_pairs) == 0:
         raise ValueError("No valid (soc_start, soc_end) pairs under the constraints.")
 
-    idx = rng.integers(0, len(valid_pairs), size=n_samples)
-    soc_start = valid_pairs[idx, 0]
-    soc_end = valid_pairs[idx, 1]
+    blocks = []
+    for temp in allowed_temp:
+        idx = rng.integers(0, len(valid_pairs), size=n_samples_per_temp)
+        soc_start = valid_pairs[idx, 0]
+        soc_end = valid_pairs[idx, 1]
+        c_rate_chg = rng.choice(allowed_cur_cha, size=n_samples_per_temp, replace=True)
+        c_rate_dchg = rng.choice(allowed_cur_dis, size=n_samples_per_temp, replace=True)
+        temp_col = np.full(n_samples_per_temp, temp, dtype=float)
 
-    temp = rng.choice(allowed_temp, size=n_samples, replace=True)
-    c_rate_chg = rng.choice(allowed_cur_cha, size=n_samples, replace=True)
-    c_rate_dchg = rng.choice(allowed_cur_dis, size=n_samples, replace=True)
+        block = pd.DataFrame(
+            {
+                "soc_start": soc_start,
+                "soc_end": soc_end,
+                "c_rate_chg": c_rate_chg,
+                "c_rate_dchg": c_rate_dchg,
+                "temp": temp_col,
+            }
+        )
+        blocks.append(block)
 
-    X_mc_raw = pd.DataFrame(
-        {
-            "soc_start": soc_start,
-            "soc_end": soc_end,
-            "c_rate_chg": c_rate_chg,
-            "c_rate_dchg": c_rate_dchg,
-            "temp": temp,
-        }
-    )[raw_conds].astype(float)
+    X_mc_raw = pd.concat(blocks, ignore_index=True)[raw_conds].astype(float)
 
     X_mc_feat, _ = make_features_from_raw(X_mc_raw, raw_conds=raw_conds, drop_raw_soc=True)
 
@@ -222,8 +253,9 @@ def monte_carlo_best_conditions_for_distance(
     out["dod"] = X_mc_feat["dod"].to_numpy()
     out["pred_dist_feat"] = pred  # predicted distance-to-nearest-ref in feature space
 
-    best = out.nsmallest(top_k, "pred_dist_feat").reset_index(drop=True)
-    return best
+    if top_k is None:
+        return out.reset_index(drop=True)
+    return out.nsmallest(top_k, "pred_dist_feat").reset_index(drop=True)
 
 
 # -----------------------------
@@ -409,6 +441,33 @@ def idx_first_reach_soh(traj: pd.DataFrame, soh_target: float) -> int | None:
     return int(hit[0])
 
 
+def interp_step_at_soh(traj: pd.DataFrame, soh_target: float) -> float | None:
+    if traj is None or traj.empty or "SOH" not in traj.columns:
+        return None
+
+    s = traj["SOH"].to_numpy(dtype=float)
+    ok = ~np.isnan(s)
+    if not np.any(ok):
+        return None
+    s = s[ok]
+
+    if np.nanmin(s) > soh_target:
+        return None
+
+    idx = np.arange(len(s), dtype=float)
+    order = np.argsort(s)
+    s_sorted = s[order]
+    idx_sorted = idx[order]
+
+    keep = ~pd.Series(s_sorted).duplicated(keep="first")
+    s_sorted = s_sorted[keep.values]
+    idx_sorted = idx_sorted[keep.values]
+    if len(s_sorted) < 2:
+        return None
+
+    return float(np.interp(soh_target, s_sorted, idx_sorted))
+
+
 def exhaustive_best_conditions_for_distance(
     df_exp, model, ref_names, raw_conds=RAW_CONDS_DEFAULT,
     n_samples_per_temp=200, top_k=8, random_state=42,
@@ -476,10 +535,16 @@ def main(
     rows_ref = []
 
     # Reference cell names
-    REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
+    REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
 
     # CONFIG YOU WANT:
     K_CLOSEST_FEATURE = 25
+    MC_SAMPLES_PER_TEMP = 200
+    MC_TOP_K = 16
+    MC_TOP_PER_TEMP = 4
+    MC_TEMP_TARGETS = [25.0, 40.0]
+    MC_TOP_FEATURE = 5
+    FEATURE_RANK_COL = "var_dQ_c_at_thr500k"
     K_SLOWEST_BLACK = 1
     SOH_SLOW_TARGET = 0.96
 
@@ -693,7 +758,7 @@ def main(
     # Closest/farthest in 3D feature space + build dist_df for surrogate training
     # -----------------------------
     x_col = "mean_d_dqdv_m_c"
-    y_col = "mean_d_dqdv_l_c"
+    y_col = "mean_d_dqdv_l_c_l"
     z_col = "mean_d_dqdv_h_c"
     K_FARTHEST = 20
 
@@ -703,6 +768,7 @@ def main(
         .reset_index(drop=True)
     )
     exp_sub = df_exp[["cell_name", x_col, y_col, z_col]].dropna().reset_index(drop=True)
+    exp_sub = exp_sub[~exp_sub["cell_name"].str.contains("reference", case=False, na=False)].reset_index(drop=True)
 
     closest_cellnames: list[str] = []
     farthest_cellnames: list[str] = []
@@ -1055,38 +1121,96 @@ def main(
                 added_green_label_t = True
 
     # -----------------------------
-    # NEW: Train surrogate model (exp_conds -> dist_feat) and run Monte Carlo search
+    # NEW: two-step Monte Carlo selection (no weighted cost)
+    # 1) top MC_TOP_K by predicted dist_feat (feature similarity)
+    # 2) from those, top MC_TOP_FEATURE by highest predicted FEATURE_RANK_COL
     # -----------------------------
+    best = pd.DataFrame()
     if not dist_df.empty:
-        print("\n" + "=" * 90)
-        print("Training surrogate XGB model: exp_conds -> distance-to-nearest-ref (dist_feat)")
-        print("=" * 90)
+        if df_all is None or df_all.empty:
+            print("[WARN] df_all empty; cannot train feature model for step 2.")
+        elif FEATURE_RANK_COL not in df_all.columns:
+            print(f"[WARN] FEATURE_RANK_COL not in df_all: {FEATURE_RANK_COL}")
+        else:
+            print("" + "=" * 90)
+            print("Training surrogate XGB models for two-step Monte Carlo selection")
+            print("=" * 90)
 
-        model, explainer, X_feat, y, feat_names = train_xgb_no_val_and_shap(
-            df_exp=df_exp,
-            dist_df=dist_df,
-            ref_names=REF_NAMES,
-        )
+            model_dist, _, _, _, _ = train_xgb_no_val_and_shap(
+                df_exp=df_exp,
+                dist_df=dist_df,
+                ref_names=REF_NAMES,
+            )
+            feat_series = pd.to_numeric(df_all[FEATURE_RANK_COL], errors="coerce")
+            print(
+                f"[DIAG] {FEATURE_RANK_COL}: n={int(feat_series.notna().sum())}, "
+                f"unique={int(feat_series.nunique(dropna=True))}, "
+                f"min={float(feat_series.min()) if feat_series.notna().any() else float('nan'):.6g}, "
+                f"max={float(feat_series.max()) if feat_series.notna().any() else float('nan'):.6g}"
+            )
 
-        print("df_all columns:", df_all.columns.tolist())
-        print("df_all shape:", df_all.shape)
-        best = run_combined_search(
-            df_exp=df_exp,
-            dist_df=dist_df,
-            df_reg_table=df_all,
-            ref_names=REF_NAMES,
-            w1=5,
-            w2=0.1,
-            n_samples_per_temp=200,
-            top_k=8,
-        )
+            model_var = train_model_var_dqc(
+                df_exp=df_exp,
+                df_reg_table=df_all,
+                target_col=FEATURE_RANK_COL,
+            )
 
-        print("\n" + "=" * 90)
-        print("Top 20 Monte Carlo conditions with smallest predicted distance-to-nearest-ref (dist_feat)")
-        print("=" * 90)
-        print(best.to_string(index=False))
+            mc_all = monte_carlo_best_conditions_for_distance(
+                df_exp=df_exp,
+                model=model_dist,
+                ref_names=REF_NAMES,
+                n_samples_per_temp=MC_SAMPLES_PER_TEMP,
+                top_k=None,
+            )
+            if mc_all.empty:
+                print("[WARN] Monte Carlo search returned no candidates.")
+            else:
+                mc_blocks = []
+                for t in MC_TEMP_TARGETS:
+                    block = mc_all[mc_all["temp"] == float(t)].nsmallest(
+                        MC_TOP_PER_TEMP, "pred_dist_feat"
+                    )
+                    if block.empty:
+                        print(f"[WARN] No candidates for temp={t}.")
+                    else:
+                        mc_blocks.append(block)
+
+                if not mc_blocks:
+                    print("[WARN] No per-temperature selections were created.")
+                else:
+                    mc_top = pd.concat(mc_blocks, ignore_index=True)
+
+                    X_mc_feat, _ = make_features_from_raw(
+                        mc_top, raw_conds=RAW_CONDS_DEFAULT, drop_raw_soc=True
+                    )
+                    pred_var = model_var.predict(X_mc_feat).astype(float)
+                    mc_top["pred_var_dQc"] = pred_var
+
+                    print("" + "=" * 90)
+                    print(
+                        f"Top {len(mc_top)} Monte Carlo by predicted dist_feat "
+                        f"(per-temp: {MC_TOP_PER_TEMP} each for {MC_TEMP_TARGETS})"
+                    )
+                    print("=" * 90)
+                    print(mc_top.to_string(index=False))
+                    print("Conditions only (top MC by dist_feat):")
+                    print(mc_top[exp_conds].to_string(index=False))
+
+                    best = (
+                        mc_top.sort_values("pred_var_dQc", ascending=False)
+                        .head(MC_TOP_FEATURE)
+                        .reset_index(drop=True)
+                    )
+                print("" + "=" * 90)
+                print(
+                    f"Top {len(best)} within closest {len(mc_top)} by predicted {FEATURE_RANK_COL}"
+                )
+                print("=" * 90)
+                print(best.to_string(index=False))
+                print("Conditions only (final top by feature):")
+                print(best[exp_conds].to_string(index=False))
     else:
-        best = pd.DataFrame()
+        print("[WARN] dist_df empty; skipping two-step Monte Carlo selection.")
 
     # -----------------------------
     # Overlay trajectories: closest = orange, farthest = green, slowest among closest = black
@@ -1423,12 +1547,8 @@ def main(
                 if len(last_soh) == 0 or last_soh[-1] > SOH_STEP_TARGET:
                     continue
 
-                hits = np.where(soh_vals <= SOH_STEP_TARGET)[0]
-                if len(hits) == 0:
-                    continue
-
-                n_steps = int(hits[0])
-                if n_steps <= 0:
+                n_steps = interp_step_at_soh(df_interp, SOH_STEP_TARGET)
+                if n_steps is None or n_steps <= 0:
                     continue
 
                 feat_vals = df_interp[feat_name].to_numpy(dtype=float)
@@ -1556,11 +1676,8 @@ def main(
         if len(last_soh) == 0 or last_soh[-1] > SOH_STEP_TARGET:
             continue
 
-        hits = np.where(soh_vals <= SOH_STEP_TARGET)[0]
-        if len(hits) == 0:
-            continue
-        n_steps = int(hits[0])
-        if n_steps <= 0:
+        n_steps = interp_step_at_soh(df_interp, SOH_STEP_TARGET)
+        if n_steps is None or n_steps <= 0:
             continue
 
         feat_vals = df_interp["mean_d_dqdv_m_c"].to_numpy(dtype=float)
@@ -1637,7 +1754,7 @@ if __name__ == "__main__":
     out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
 
     # choose here:
-    INTERP_METHOD = "cubic"   # "cubic" or "linear"
+    INTERP_METHOD = "linear"   # "cubic" or "linear"
     THROUGHPUT_MAX = 8e7      # set to None if you do NOT want the limit
 
     main(

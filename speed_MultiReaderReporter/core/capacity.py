@@ -351,8 +351,8 @@ def extract_features(df,cell,cfg):
     df_capa_cha = df.loc[mask_capa_cha]; df_capa_dis = df.loc[mask_capa_dis]
 
     features['CU_time'] = df["abs_time"].iloc[0]
-    features['cap_dis'] = df_capa_dis["qstep"].iloc[-1]; features['cap_cha'] = df_capa_cha["qstep"].iloc[-1]
-    features['cap_ocv_dis'] = df_ocv_cha["qstep"].iloc[-1]; features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1]
+    features['cap_dis'] = df_capa_cha["qstep"].iloc[-1]; features['cap_cha'] = df_capa_cha["qstep"].iloc[-1]
+    features['cap_ocv_cha'] = df_ocv_cha["qstep"].iloc[-1]; features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1]
     # todo: make the input a list for shorter code
     # get the ICA info for feature extraction
     V_cha, dQdV_cha, Q_intcha = extract_ICA(df_ocv_cha, cell, cfg)
@@ -390,10 +390,10 @@ def extract_features(df,cell,cfg):
     features["peakQ_min_dis"] = p_dva_min_dis["x_peaks"]; features["peakDVA_min_dis"] = p_dva_min_dis["y_peaks"]
 
     # get the thermal features
-    V_disT, dTdV_dis, T_intV = extract_ITA(df_capa_dis, cell, cfg)
-    features["VdisT"] = V_disT
-    features["dTdV"] = dTdV_dis
-    features["T_intV"] = T_intV
+    # V_disT, dTdV_dis, T_intV = extract_ITA(df_capa_dis, cell, cfg)
+    # features["VdisT"] = V_disT
+    # features["dTdV"] = dTdV_dis
+    # features["T_intV"] = T_intV
 
     return features
 

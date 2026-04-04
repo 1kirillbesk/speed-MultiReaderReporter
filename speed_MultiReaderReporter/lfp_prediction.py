@@ -28,11 +28,11 @@ from pathlib import Path
 here = Path(__file__).resolve().parent
 INTERP_DIR = here / "interp_feature"
 
-FEATURE_COLS = ["mean_d_dqdv_m_c",
+FEATURE_COLS = ["mean_d_dqdv_m_c","mean_d_dqdv_h_c","mean_d_dqdv_l_c",
     "var_d_dqdv_m_c","var_d_dqdv_h_c","var_d_dqdv_l_c","SOH"
 ]
 TARGET_COL = "step_to_soh_target"
-INPUT_STEPS = 15         # how many interpolated time steps to use as input
+INPUT_STEPS = 6         # how many interpolated time steps to use as input
 INPUT_FEATURES = len(FEATURE_COLS)
 
 TEST_NAMES = [
