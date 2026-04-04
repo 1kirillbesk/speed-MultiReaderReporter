@@ -24,7 +24,7 @@ def load_config(cfg_path: Path) -> dict:
 def main():
     # ---------- config ----------
     here = Path(__file__).resolve().parent
-    cfg = load_config(here / "private/config_lw.yaml") #config602
+    cfg = load_config(here / "pc602/config_lw.yaml") #config602
 
     in_path = Path(cfg["input"]["path"]).resolve()
     recurse = bool(cfg["input"].get("recurse", True))
