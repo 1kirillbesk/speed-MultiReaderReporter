@@ -1204,6 +1204,6 @@ def main(dir_path: Path, out_dir: Path):
 if __name__ == "__main__":
     dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
     out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for
-    # dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
-    # out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
+    dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
+    out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
     main(dir_path, out_dir)
