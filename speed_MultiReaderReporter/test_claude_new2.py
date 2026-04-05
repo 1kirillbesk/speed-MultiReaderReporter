@@ -24,7 +24,6 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
-from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 from analyze_linear_prediction import build_regression_table_cap93_and_var_at_thr
 import xgboost as xgb
@@ -49,7 +48,7 @@ interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature
 out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
 out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
+REF_NAMES = ["SPEED_LW_reference_10", "SPEED_LW_reference_11", "SPEED_LW_reference_12"]
 
 x_col = "Vcha"
 y_col = "dQdVcha"
@@ -59,11 +58,12 @@ v_2 = 3.35
 v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
-TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.952
+TARGET_SOH_PLOT = 0.975        # SOH for interpolation grid
+SOH_STEP_TARGET = 0.91
 FEATURE_STEP_LOGLOG = 7
 THROUGHPUT_FEATURE_LOGLOG = 2000000.0 / 3600.0 / 3.4
-SOH_THROUGHPUT_TARGET = 0.951
+SOH_THROUGHPUT_TARGET = 0.91
+EXTRAPOLATE_SOH_TARGET_IF_NOT_REACHED = False
 
 K_CLOSEST = 20
 K_FARTHEST = 20
@@ -91,14 +91,14 @@ exp_conditions = {}
 traj_by_cell_reg = {}
 
 # Model config
-FEATURE_COLS = ["SOH", "capacity", "mean_low_cha", "mean_mid_cha", "mean_pla_cha", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha"]
-INPUT_STEPS = 8
+FEATURE_COLS = ["SOH", "capacity", "var_high_cha", "var_pla_cha", "mean_pla_cha",]
+INPUT_STEPS = 9
 INPUT_FEATURES = len(FEATURE_COLS)
 
 TEST_NAMES = [
-    "SPEED_LW_reference_4",
-    "SPEED_LW_reference_5",
-    "SPEED_LW_reference_6",
+    "SPEED_LW_reference_10",
+    "SPEED_LW_reference_11",
+    "SPEED_LW_reference_12",
 ]
 
 EPOCHS = 500
@@ -108,6 +108,7 @@ DROPOUT = 0.1
 VALIDATION_SPLIT = 0.2
 USE_VALIDATION = True
 N_SEEDS = 10
+INITIAL_CAP_HIST_BINS = 45
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 mse_loss = nn.MSELoss()
@@ -198,6 +199,78 @@ def interp_value_at_target(x, y, x_target, method="linear"):
     if y_interp is None or len(y_interp) == 0 or not np.isfinite(y_interp[0]):
         return None
     return float(y_interp[0])
+
+
+def interp_value_with_optional_extrapolation(x, y, x_target, method="linear", allow_extrapolation=False):
+    """
+    Interpolate scalar y-value at x_target.
+    If x_target is outside data range and allow_extrapolation=True,
+    use linear extrapolation from the nearest edge segment.
+    """
+    x_clean, y_clean = clean_xy_for_interp(x, y)
+    if x_clean is None or y_clean is None:
+        return None
+
+    x_target = float(x_target)
+    x_min = float(x_clean[0])
+    x_max = float(x_clean[-1])
+
+    if x_min <= x_target <= x_max:
+        return interp_value_at_target(x_clean, y_clean, x_target, method=method)
+
+    if not allow_extrapolation or len(x_clean) < 2:
+        return None
+
+    if x_target < x_min:
+        x0, x1 = float(x_clean[0]), float(x_clean[1])
+        y0, y1 = float(y_clean[0]), float(y_clean[1])
+    else:
+        x0, x1 = float(x_clean[-2]), float(x_clean[-1])
+        y0, y1 = float(y_clean[-2]), float(y_clean[-1])
+
+    dx = x1 - x0
+    if abs(dx) < 1e-12:
+        return None
+
+    slope = (y1 - y0) / dx
+    return float(y0 + slope * (x_target - x0))
+
+
+def mape_on_references_from_log_fit(coeffs, ref_log_x, ref_log_y_true, ref_y_true=None):
+    """
+    Compute MAPE for reference points using a linear fit in log space.
+    Returns:
+      - mape_log   : MAPE (%) in log-space target
+      - mape_orig  : MAPE (%) in original target units (if ref_y_true is provided), else np.nan
+    """
+    ref_log_x = np.asarray(ref_log_x, dtype=float)
+    ref_log_y_true = np.asarray(ref_log_y_true, dtype=float)
+    if len(ref_log_x) == 0 or len(ref_log_y_true) == 0:
+        return np.nan, np.nan
+    if len(ref_log_x) != len(ref_log_y_true):
+        n = min(len(ref_log_x), len(ref_log_y_true))
+        ref_log_x = ref_log_x[:n]
+        ref_log_y_true = ref_log_y_true[:n]
+    if len(ref_log_x) == 0:
+        return np.nan, np.nan
+
+    ref_log_pred = np.polyval(coeffs, ref_log_x)
+    denom_log = np.maximum(np.abs(ref_log_y_true), 1e-12)
+    mape_log = float(np.mean(np.abs((ref_log_pred - ref_log_y_true) / denom_log)) * 100.0)
+
+    mape_orig = np.nan
+    if ref_y_true is not None:
+        ref_y_true = np.asarray(ref_y_true, dtype=float)
+        if len(ref_y_true) != len(ref_log_pred):
+            n = min(len(ref_y_true), len(ref_log_pred))
+            ref_y_true = ref_y_true[:n]
+            ref_log_pred = ref_log_pred[:n]
+        if len(ref_y_true) > 0:
+            ref_y_pred = np.exp(ref_log_pred)
+            denom_orig = np.maximum(np.abs(ref_y_true), 1e-12)
+            mape_orig = float(np.mean(np.abs((ref_y_pred - ref_y_true) / denom_orig)) * 100.0)
+
+    return mape_log, mape_orig
 
 
 def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="linear", throughput_max=None):
@@ -721,17 +794,13 @@ for cell_name, cell_dict in interp_data.items():
     # step axis on interpolated grid
     step_axis = np.arange(len(soh), dtype=float)
 
-    # if target SOH is never reached, keep None
-    if np.nanmin(soh) > SOH_STEP_TARGET:
-        cell_dict["step_to_target"] = None
-        continue
-
-    # interpolate fractional step where SOH reaches target
-    step_to_target = interp_value_at_target(
+    # interpolate/extrapolate fractional step where SOH reaches target
+    step_to_target = interp_value_with_optional_extrapolation(
         x=soh[::-1],          # SOH ascending after reverse
         y=step_axis[::-1],    # corresponding step positions
         x_target=SOH_STEP_TARGET,
-        method=INTERP_METHOD  # or use "linear" if you want monotonic safety
+        method=INTERP_METHOD,
+        allow_extrapolation=EXTRAPOLATE_SOH_TARGET_IF_NOT_REACHED,
     )
 
     cell_dict["step_to_target"] = step_to_target
@@ -827,7 +896,7 @@ if len(initial_capacities) > 0:
     fig_capdist, ax_capdist = plt.subplots(figsize=(8, 5))
     ax_capdist.hist(
         init_caps,
-        bins="auto",
+        bins=INITIAL_CAP_HIST_BINS,
         density=True,
         alpha=0.55,
         color="steelblue",
@@ -1000,6 +1069,7 @@ else:
                 "slope": np.nan,
                 "intercept": np.nan,
                 "corr_r": np.nan,
+                "mape_ref_steps": np.nan,
             })
 
             ax_ll_closest.set_title(f"{feat_name}\nclosest: insufficient data")
@@ -1010,6 +1080,7 @@ else:
                 "slope": np.nan,
                 "intercept": np.nan,
                 "corr_r": np.nan,
+                "mape_ref_steps": np.nan,
             })
 
             ax_ll_farthest.set_title(f"{feat_name}\nfarthest: insufficient data")
@@ -1020,6 +1091,7 @@ else:
                 "slope": np.nan,
                 "intercept": np.nan,
                 "corr_r": np.nan,
+                "mape_ref_steps": np.nan,
             })
             continue
 
@@ -1052,8 +1124,18 @@ else:
         )
 
         r = float(np.corrcoef(log_feat_arr, log_steps_arr)[0, 1])
+        _, mape_ref_steps_all = mape_on_references_from_log_fit(
+            coeffs,
+            ref_log_x_feat,
+            ref_log_true_steps_feat,
+            ref_true_steps_feat,
+        )
 
-        ax_ll.set_title(f"{feat_name}\nn={len(log_feat_arr)}, r={r:.3f}")
+        mape_ref_steps_all_txt = f"{mape_ref_steps_all:.1f}" if np.isfinite(mape_ref_steps_all) else "nan"
+        ax_ll.set_title(
+            f"{feat_name}\n"
+            f"n={len(log_feat_arr)}, r={r:.3f}, MAPE_ref={mape_ref_steps_all_txt}%"
+        )
         ax_ll.set_xlabel(f"log(|{feat_name}|) @ step {FEATURE_STEP_LOGLOG}")
         ax_ll.set_ylabel(f"log(steps to SOH <= {SOH_STEP_TARGET})")
         ax_ll.grid(True, alpha=0.3)
@@ -1065,6 +1147,7 @@ else:
             "slope": slope,
             "intercept": intercept,
             "corr_r": r,
+            "mape_ref_steps": mape_ref_steps_all,
         })
 
         # additional fit: closest only
@@ -1094,13 +1177,24 @@ else:
                 label=f"slope={slope_c:.3f}, int={intercept_c:.3f}"
             )
             r_c = float(np.corrcoef(x_closest, y_closest)[0, 1])
-            ax_ll_closest.set_title(f"{feat_name}\nclosest n={n_closest}, r={r_c:.3f}")
+            _, mape_ref_steps_c = mape_on_references_from_log_fit(
+                coeffs_c,
+                ref_log_x_feat,
+                ref_log_true_steps_feat,
+                ref_true_steps_feat,
+            )
+            mape_ref_steps_c_txt = f"{mape_ref_steps_c:.1f}" if np.isfinite(mape_ref_steps_c) else "nan"
+            ax_ll_closest.set_title(
+                f"{feat_name}\n"
+                f"closest n={n_closest}, r={r_c:.3f}, MAPE_ref={mape_ref_steps_c_txt}%"
+            )
             loglog_summary_rows_closest.append({
                 "feature": feat_name,
                 "n": n_closest,
                 "slope": slope_c,
                 "intercept": intercept_c,
                 "corr_r": r_c,
+                "mape_ref_steps": mape_ref_steps_c,
             })
             ax_ll_closest.legend(loc="best", fontsize=8)
         else:
@@ -1111,6 +1205,7 @@ else:
                 "slope": np.nan,
                 "intercept": np.nan,
                 "corr_r": np.nan,
+                "mape_ref_steps": np.nan,
             })
         ax_ll_closest.set_xlabel(f"log(|{feat_name}|) @ step {FEATURE_STEP_LOGLOG}")
         ax_ll_closest.set_ylabel(f"log(steps to SOH <= {SOH_STEP_TARGET})")
@@ -1143,13 +1238,24 @@ else:
                 label=f"slope={slope_f:.3f}, int={intercept_f:.3f}"
             )
             r_f = float(np.corrcoef(x_farthest, y_farthest)[0, 1])
-            ax_ll_farthest.set_title(f"{feat_name}\nfarthest n={n_farthest}, r={r_f:.3f}")
+            _, mape_ref_steps_f = mape_on_references_from_log_fit(
+                coeffs_f,
+                ref_log_x_feat,
+                ref_log_true_steps_feat,
+                ref_true_steps_feat,
+            )
+            mape_ref_steps_f_txt = f"{mape_ref_steps_f:.1f}" if np.isfinite(mape_ref_steps_f) else "nan"
+            ax_ll_farthest.set_title(
+                f"{feat_name}\n"
+                f"farthest n={n_farthest}, r={r_f:.3f}, MAPE_ref={mape_ref_steps_f_txt}%"
+            )
             loglog_summary_rows_farthest.append({
                 "feature": feat_name,
                 "n": n_farthest,
                 "slope": slope_f,
                 "intercept": intercept_f,
                 "corr_r": r_f,
+                "mape_ref_steps": mape_ref_steps_f,
             })
             ax_ll_farthest.legend(loc="best", fontsize=8)
         else:
@@ -1160,6 +1266,7 @@ else:
                 "slope": np.nan,
                 "intercept": np.nan,
                 "corr_r": np.nan,
+                "mape_ref_steps": np.nan,
             })
         ax_ll_farthest.set_xlabel(f"log(|{feat_name}|) @ step {FEATURE_STEP_LOGLOG}")
         ax_ll_farthest.set_ylabel(f"log(steps to SOH <= {SOH_STEP_TARGET})")
@@ -1269,6 +1376,7 @@ else:
 
         ref_log_x = []
         ref_log_y_true = []
+        ref_true_y = []
 
         for cell_name, cell_dict in interp_data.items():
             if feat_name not in cell_dict or "time" not in cell_dict or "SOH" not in cell_dict:
@@ -1298,14 +1406,12 @@ else:
             if f_at_thr is None or (not np.isfinite(f_at_thr)) or f_at_thr == 0.0:
                 continue
 
-            if np.nanmin(soh_arr) > SOH_THROUGHPUT_TARGET:
-                continue
-
-            thr_to_soh_target = interp_value_at_target(
+            thr_to_soh_target = interp_value_with_optional_extrapolation(
                 x=soh_arr[::-1],
                 y=t_arr[::-1],
                 x_target=SOH_THROUGHPUT_TARGET,
-                method=INTERP_METHOD
+                method=INTERP_METHOD,
+                allow_extrapolation=EXTRAPOLATE_SOH_TARGET_IF_NOT_REACHED,
             )
             if thr_to_soh_target is None or (not np.isfinite(thr_to_soh_target)) or thr_to_soh_target <= 0.0:
                 continue
@@ -1322,6 +1428,7 @@ else:
                 color_arr.append("red")
                 ref_log_x.append(lx)
                 ref_log_y_true.append(ly)
+                ref_true_y.append(thr_to_soh_target)
             elif cell_name in closest_set:
                 color_arr.append("orange")
             elif cell_name in farthest_set:
@@ -1334,11 +1441,19 @@ else:
         color_arr = np.array(color_arr, dtype=str)
         ref_log_x = np.array(ref_log_x, dtype=float)
         ref_log_y_true = np.array(ref_log_y_true, dtype=float)
+        ref_true_y = np.array(ref_true_y, dtype=float)
 
         if len(log_x) < 2:
             ax_all.set_title(f"{feat_name}\ninsufficient data")
             ax_all.grid(True, alpha=0.3)
-            summary_thr_all.append({"feature": feat_name, "n": len(log_x), "slope": np.nan, "intercept": np.nan, "corr_r": np.nan})
+            summary_thr_all.append({
+                "feature": feat_name,
+                "n": len(log_x),
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+                "mape_ref_thr": np.nan,
+            })
         else:
             label_map = {"blue": "other", "orange": "closest", "green": "farthest", "red": "refs"}
             for cv in ["blue", "orange", "green", "red"]:
@@ -1359,7 +1474,17 @@ else:
             yfit_all = np.polyval(coeffs_all, xfit_all)
             ax_all.plot(xfit_all, yfit_all, "k--", lw=1.3, label=f"slope={slope_all:.3f}, int={intercept_all:.3f}")
             r_all = float(np.corrcoef(log_x, log_y)[0, 1])
-            ax_all.set_title(f"{feat_name}\nn={len(log_x)}, r={r_all:.3f}")
+            _, mape_ref_thr_all = mape_on_references_from_log_fit(
+                coeffs_all,
+                ref_log_x,
+                ref_log_y_true,
+                ref_true_y,
+            )
+            mape_ref_thr_all_txt = f"{mape_ref_thr_all:.1f}" if np.isfinite(mape_ref_thr_all) else "nan"
+            ax_all.set_title(
+                f"{feat_name}\n"
+                f"n={len(log_x)}, r={r_all:.3f}, MAPE_ref={mape_ref_thr_all_txt}%"
+            )
             ax_all.legend(loc="best", fontsize=8)
             summary_thr_all.append({
                 "feature": feat_name,
@@ -1367,6 +1492,7 @@ else:
                 "slope": slope_all,
                 "intercept": intercept_all,
                 "corr_r": r_all,
+                "mape_ref_thr": mape_ref_thr_all,
             })
         ax_all.set_xlabel(f"log(|{feat_name}|) @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)}")
         ax_all.set_ylabel(f"log(throughput to SOH <= {SOH_THROUGHPUT_TARGET})")
@@ -1406,18 +1532,36 @@ else:
             yfit_close = np.polyval(coeffs_close, xfit_close)
             ax_close.plot(xfit_close, yfit_close, "k--", lw=1.3, label=f"slope={slope_close:.3f}, int={intercept_close:.3f}")
             r_close = float(np.corrcoef(x_close, y_close)[0, 1])
-            ax_close.set_title(f"{feat_name}\nclosest n={n_close}, r={r_close:.3f}")
+            _, mape_ref_thr_close = mape_on_references_from_log_fit(
+                coeffs_close,
+                ref_log_x,
+                ref_log_y_true,
+                ref_true_y,
+            )
+            mape_ref_thr_close_txt = f"{mape_ref_thr_close:.1f}" if np.isfinite(mape_ref_thr_close) else "nan"
+            ax_close.set_title(
+                f"{feat_name}\n"
+                f"closest n={n_close}, r={r_close:.3f}, MAPE_ref={mape_ref_thr_close_txt}%"
+            )
             summary_thr_closest.append({
                 "feature": feat_name,
                 "n": n_close,
                 "slope": slope_close,
                 "intercept": intercept_close,
                 "corr_r": r_close,
+                "mape_ref_thr": mape_ref_thr_close,
             })
             ax_close.legend(loc="best", fontsize=8)
         else:
             ax_close.set_title(f"{feat_name}\nclosest: insufficient data")
-            summary_thr_closest.append({"feature": feat_name, "n": n_close, "slope": np.nan, "intercept": np.nan, "corr_r": np.nan})
+            summary_thr_closest.append({
+                "feature": feat_name,
+                "n": n_close,
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+                "mape_ref_thr": np.nan,
+            })
         ax_close.set_xlabel(f"log(|{feat_name}|) @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)}")
         ax_close.set_ylabel(f"log(throughput to SOH <= {SOH_THROUGHPUT_TARGET})")
         ax_close.grid(True, alpha=0.3)
@@ -1440,18 +1584,36 @@ else:
             yfit_far = np.polyval(coeffs_far, xfit_far)
             ax_far.plot(xfit_far, yfit_far, "k--", lw=1.3, label=f"slope={slope_far:.3f}, int={intercept_far:.3f}")
             r_far = float(np.corrcoef(x_far, y_far)[0, 1])
-            ax_far.set_title(f"{feat_name}\nfarthest n={n_far}, r={r_far:.3f}")
+            _, mape_ref_thr_far = mape_on_references_from_log_fit(
+                coeffs_far,
+                ref_log_x,
+                ref_log_y_true,
+                ref_true_y,
+            )
+            mape_ref_thr_far_txt = f"{mape_ref_thr_far:.1f}" if np.isfinite(mape_ref_thr_far) else "nan"
+            ax_far.set_title(
+                f"{feat_name}\n"
+                f"farthest n={n_far}, r={r_far:.3f}, MAPE_ref={mape_ref_thr_far_txt}%"
+            )
             summary_thr_farthest.append({
                 "feature": feat_name,
                 "n": n_far,
                 "slope": slope_far,
                 "intercept": intercept_far,
                 "corr_r": r_far,
+                "mape_ref_thr": mape_ref_thr_far,
             })
             ax_far.legend(loc="best", fontsize=8)
         else:
             ax_far.set_title(f"{feat_name}\nfarthest: insufficient data")
-            summary_thr_farthest.append({"feature": feat_name, "n": n_far, "slope": np.nan, "intercept": np.nan, "corr_r": np.nan})
+            summary_thr_farthest.append({
+                "feature": feat_name,
+                "n": n_far,
+                "slope": np.nan,
+                "intercept": np.nan,
+                "corr_r": np.nan,
+                "mape_ref_thr": np.nan,
+            })
         ax_far.set_xlabel(f"log(|{feat_name}|) @ throughput {int(THROUGHPUT_FEATURE_LOGLOG)}")
         ax_far.set_ylabel(f"log(throughput to SOH <= {SOH_THROUGHPUT_TARGET})")
         ax_far.grid(True, alpha=0.3)
@@ -1861,7 +2023,7 @@ for cell_name, cell_dict in interp_data.items():
 
     step_to_target = cell_dict.get("step_to_target")
     if step_to_target is None or step_to_target <= 0:
-        print(f"  [SKIP] {cell_name} — never reached SOH={SOH_STEP_TARGET}")
+        print(f"  [SKIP] {cell_name} — invalid step_to_target for SOH={SOH_STEP_TARGET}")
         continue
     step_to_target = float(step_to_target)
 
@@ -1902,20 +2064,9 @@ print(f"Features: {FEATURE_COLS}")
 print(f"Input shape per cell: ({INPUT_STEPS}, {INPUT_FEATURES})")
 
 
-# =============================================================================
-# STEP 7: SCALE FEATURES
-# =============================================================================
-combined = np.concatenate([X_train_all, X_test], axis=0)
-flat = combined.reshape(-1, INPUT_FEATURES)
-scaler = StandardScaler()
-flat_scaled = scaler.fit_transform(flat)
-combined_scaled = flat_scaled.reshape(combined.shape)
-X_train_all = combined_scaled[:len(train_X_list)]
-X_test = combined_scaled[len(train_X_list):]
-
 # log-transform target
-y_train_all = np.log(y_train_all/10)
-y_test = np.log(y_test/10)
+y_train_all = np.log(y_train_all / 20.0)
+y_test = np.log(y_test / 20.0)
 
 
 # =============================================================================
@@ -2028,7 +2179,7 @@ for i in random_numbers:
 y_pred_mean = np.mean(y_pred_list, axis=0)
 
 print("\n" + "=" * 70)
-print(f"RESULTS (log space) — interpolation={INTERP_METHOD}")
+print(f"RESULTS (step scale) — interpolation={INTERP_METHOD}")
 print("=" * 70)
 for name, true, pred in zip(test_names_found, y_test, y_pred_mean):
     print(f"  {name:30s}  true={true:.4f}  pred={pred:.4f}")
@@ -2036,8 +2187,8 @@ for name, true, pred in zip(test_names_found, y_test, y_pred_mean):
 print(f"\n  MAPE (log):  {np.mean(np.abs((y_test - y_pred_mean) / y_test)) * 100:.2f}%")
 
 # Back to original scale
-y_test_steps = np.exp(y_test)
-y_pred_steps = np.exp(y_pred_mean)
+y_test_steps = np.exp(y_test) * 20.0
+y_pred_steps = np.exp(y_pred_mean) * 20.0
 
 print("\nRESULTS (original step scale)")
 print("=" * 70)
@@ -2068,7 +2219,7 @@ ax1.legend()
 ax1.grid(True, alpha=0.3)
 
 ax2 = axes[1]
-preds_steps = np.exp(np.array(y_pred_list))
+preds_steps = np.exp(np.array(y_pred_list)) * 20.0
 for j, name in enumerate(test_names_found):
     ax2.scatter(np.full(N_SEEDS, j), preds_steps[:, j], alpha=0.4, s=20, color="coral")
     ax2.scatter(j, y_test_steps[j], marker="*", s=200, color="steelblue", zorder=5)
