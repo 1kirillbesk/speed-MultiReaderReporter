@@ -58,14 +58,12 @@ v_2 = 3.35
 v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
-TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.93
+TARGET_SOH_PLOT = 0.975        # SOH for interpolation grid
+SOH_STEP_TARGET = 0.91
 FEATURE_STEP_LOGLOG = 7
 THROUGHPUT_FEATURE_LOGLOG = 2000000.0 / 3600.0 / 3.4
-SOH_THROUGHPUT_TARGET = 0.93
+SOH_THROUGHPUT_TARGET = 0.91
 EXTRAPOLATE_SOH_TARGET_IF_NOT_REACHED = False
-REF_IGNORE_FIRST_WEEK = True
-REF_IGNORE_WEEKS_LE = 1.0
 
 K_CLOSEST = 20
 K_FARTHEST = 20
@@ -93,7 +91,7 @@ exp_conditions = {}
 traj_by_cell_reg = {}
 
 # Model config
-FEATURE_COLS = ["SOH", "capacity", "var_high_cha", "var_pla_cha", "mean_pla_cha"]
+FEATURE_COLS = ["SOH", "capacity","var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha","mean_low_cha", "mean_mid_cha", "mean_high_cha", "mean_pla_cha",]
 INPUT_STEPS = 8
 INPUT_FEATURES = len(FEATURE_COLS)
 
@@ -110,7 +108,7 @@ DROPOUT = 0.1
 VALIDATION_SPLIT = 0.2
 USE_VALIDATION = True
 N_SEEDS = 10
-INITIAL_CAP_HIST_BINS = 18
+INITIAL_CAP_HIST_BINS = 45
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 mse_loss = nn.MSELoss()
@@ -447,28 +445,22 @@ def create_balanced_val_split(X, y, val_fraction=0.2, bins=3):
 # =============================================================================
 # MODEL
 # =============================================================================
-class TinyTemporalCNN(nn.Module):
-    def __init__(self, input_dims, timesteps, dropout_rate=0.5):
+class TinyStepMLP(nn.Module):
+    def __init__(self, input_dims, dropout_rate=0.5):
         super().__init__()
-        self.conv1 = nn.Conv1d(input_dims, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(16, 8, kernel_size=3, padding=1)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(8, 8)
-        self.fc2 = nn.Linear(8, 1)
+        self.fc1 = nn.Linear(input_dims, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, 1)
         self.dropout = nn.Dropout(dropout_rate)
-        self.bn1 = nn.BatchNorm1d(16)
-        self.bn2 = nn.BatchNorm1d(8)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(32)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn1(self.fc1(x)))
         x = self.dropout(x)
-        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn2(self.fc2(x)))
         x = self.dropout(x)
-        x = self.pool(x).squeeze(-1)
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        return self.fc2(x)
+        return self.fc3(x)
 
 
 # =============================================================================
@@ -539,73 +531,36 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
     mean_high_cha, var_high_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_2, x_hi=v_3)
     mean_pla_cha, var_pla_cha = window_delta_mean_var(df, x_col="Vcha", y_col="dQdVcha", x_lo=v_3, x_hi=3.6)
 
-    capacity_arr = df["Q_intVcha"].apply(lambda x: x[-1]).to_numpy(dtype=float)
-    throughput_arr = np.cumsum(np.array(df["throughput_sum"], dtype=float)) / 3600.0
+    capacity = df["Q_intVcha"].apply(lambda x: x[-1])
+    SOH = capacity / capacity.iloc[0]
+    throughput = np.cumsum(np.array(df["throughput_sum"], dtype=float)) / 3600.0
 
     df["CU_time"] = pd.to_datetime(df["CU_time"])
     t0 = df["CU_time"].iloc[0]
     df["time_weeks"] = (df["CU_time"] - t0).dt.total_seconds() / (7 * 24 * 3600)
-    time_array = df["time_weeks"].to_numpy(dtype=float)
-
-    mean_low_cha = np.asarray(mean_low_cha, dtype=float)
-    var_low_cha = np.asarray(var_low_cha, dtype=float)
-    mean_mid_cha = np.asarray(mean_mid_cha, dtype=float)
-    var_mid_cha = np.asarray(var_mid_cha, dtype=float)
-    mean_high_cha = np.asarray(mean_high_cha, dtype=float)
-    var_high_cha = np.asarray(var_high_cha, dtype=float)
-    mean_pla_cha = np.asarray(mean_pla_cha, dtype=float)
-    var_pla_cha = np.asarray(var_pla_cha, dtype=float)
-    var_dQ_c_arr = pd.to_numeric(df["var_dQ_c"], errors="coerce").to_numpy(dtype=float) if "var_dQ_c" in df.columns else None
-
-    if ("reference" in cell_name.lower()) and REF_IGNORE_FIRST_WEEK:
-        ref_mask = np.isfinite(time_array) & (time_array > float(REF_IGNORE_WEEKS_LE))
-        if int(np.sum(ref_mask)) < 2:
-            print(f"[WARN] {cell_name}: <2 points after removing first-week data; skipping reference cell.")
-            continue
-
-        time_array = time_array[ref_mask]
-        throughput_arr = throughput_arr[ref_mask]
-        capacity_arr = capacity_arr[ref_mask]
-        mean_low_cha = mean_low_cha[ref_mask]
-        var_low_cha = var_low_cha[ref_mask]
-        mean_mid_cha = mean_mid_cha[ref_mask]
-        var_mid_cha = var_mid_cha[ref_mask]
-        mean_high_cha = mean_high_cha[ref_mask]
-        var_high_cha = var_high_cha[ref_mask]
-        mean_pla_cha = mean_pla_cha[ref_mask]
-        var_pla_cha = var_pla_cha[ref_mask]
-        if var_dQ_c_arr is not None:
-            var_dQ_c_arr = var_dQ_c_arr[ref_mask]
-
-        # Start "real" time/throughput from the first point after week 1.
-        time_array = time_array - time_array[0]
-        throughput_arr = throughput_arr - throughput_arr[0]
-
-    capacity = pd.Series(capacity_arr)
-    SOH = capacity / capacity.iloc[0]
-    throughput = np.asarray(throughput_arr, dtype=float)
+    time_array = df["time_weeks"].to_numpy()
 
     if ("throughput_sum" in df.columns) and ("var_dQ_c" in df.columns):
         var_mid_cha_norm = np.abs(np.array(var_mid_cha, dtype=float)) / float(capacity.iloc[0])
         traj_by_cell_reg[cell_name] = pd.DataFrame({
-            "weeks": np.asarray(time_array, dtype=float),
+            "weeks": df["time_weeks"],
             "throughput_cum": throughput,
-            "var_dQ_c": np.asarray(var_dQ_c_arr, dtype=float),
+            "var_dQ_c": df["var_dQ_c"],
             "var_mid_cha": var_mid_cha_norm,
             "capacity": capacity,
         })
 
     feat_dict = {
-        "mean_low_cha": mean_low_cha,
-        "var_low_cha": var_low_cha,
-        "mean_mid_cha": mean_mid_cha,
-        "var_mid_cha": np.abs(var_mid_cha),
-        "mean_high_cha": mean_high_cha,
-        "var_high_cha": var_high_cha,
-        "mean_pla_cha": mean_pla_cha,
-        "var_pla_cha": var_pla_cha,
+        "mean_low_cha": np.array(mean_low_cha, dtype=float),
+        "var_low_cha": np.array(var_low_cha, dtype=float),
+        "mean_mid_cha": np.array(mean_mid_cha, dtype=float),
+        "var_mid_cha": np.abs(np.array(var_mid_cha, dtype=float)),
+        "mean_high_cha": np.array(mean_high_cha, dtype=float),
+        "var_high_cha": np.array(var_high_cha, dtype=float),
+        "mean_pla_cha": np.array(mean_pla_cha, dtype=float),
+        "var_pla_cha": np.array(var_pla_cha, dtype=float),
         "capacity": np.array(capacity, dtype=float),
-        "throughput": throughput,
+        "throughput": np.array(throughput, dtype=float),
         "Time": np.array(time_array, dtype=float),
         "SOH_raw": np.array(SOH, dtype=float),
     }
@@ -706,13 +661,21 @@ closest_set = set(closest_cellnames)
 farthest_set = set(farthest_cellnames)
 ref_set = set(REF_NAMES)
 
+fig_w, ax_w = plt.subplots(figsize=(10, 6))
+added_labels = {"blue": False, "orange": False, "green": False, "red": False}
+label_map = {
+    "red": "refs",
+    "orange": f"closest {K_CLOSEST}",
+    "green": f"farthest {K_FARTHEST}",
+    "blue": "other"
+}
+
 all_results = {**results_ref, **results}
 interp_data = {}
 
 for cell_name, fd in all_results.items():
     cap = np.array(fd["capacity"], dtype=float)
     time_arr = np.array(fd["throughput"], dtype=float)
-    weeks_arr = np.array(fd.get("Time", []), dtype=float)
 
     if len(cap) < 3 or cap[0] == 0:
         continue
@@ -749,10 +712,6 @@ for cell_name, fd in all_results.items():
     # interpolate SOH and capacity
     soh_interp = interp_1d(time_arr, soh, t_grid, method=INTERP_METHOD)
     cap_interp = interp_1d(time_arr, cap, t_grid, method=INTERP_METHOD)
-    weeks_interp = None
-    if len(weeks_arr) >= 2:
-        n_tw = min(len(time_arr), len(weeks_arr))
-        weeks_interp = interp_1d(time_arr[:n_tw], weeks_arr[:n_tw], t_grid, method=INTERP_METHOD)
 
     if soh_interp is None or cap_interp is None:
         continue
@@ -762,8 +721,6 @@ for cell_name, fd in all_results.items():
         "SOH": soh_interp,
         "capacity": cap_interp,
     }
-    if weeks_interp is not None:
-        cell_interp["weeks"] = weeks_interp
 
     # interpolate all features onto the same grid
     for feat_name in INTERP_FEATURES:
@@ -784,76 +741,36 @@ for cell_name, fd in all_results.items():
 
     interp_data[cell_name] = cell_interp
 
-def _group_for_cell(cn):
-    if cn in ref_set:
-        return "ref"
-    if cn in closest_set:
-        return "closest"
-    if cn in farthest_set:
-        return "farthest"
-    return "other"
+    # plot SOH
+    if cell_name in ref_set:
+        color, lw, alpha = "red", 1.8, 0.95
+    elif cell_name in closest_set:
+        color, lw, alpha = "orange", 1.2, 0.85
+    elif cell_name in farthest_set:
+        color, lw, alpha = "green", 1.2, 0.85
+    else:
+        color, lw, alpha = "blue", 0.6, 0.20
 
+    label = None
+    if not added_labels[color]:
+        label = label_map[color]
+        added_labels[color] = True
 
-def _plot_soh_trajectories(interp_data_local, x_mode="index"):
-    style_map_local = {
-        "ref": {"color": "red", "lw": 1.8, "alpha": 0.95, "label": "refs", "z": 4},
-        "closest": {"color": "orange", "lw": 1.2, "alpha": 0.85, "label": f"closest {K_CLOSEST}", "z": 3},
-        "farthest": {"color": "green", "lw": 1.2, "alpha": 0.85, "label": f"farthest {K_FARTHEST}", "z": 2},
-        "other": {"color": "blue", "lw": 0.6, "alpha": 0.20, "label": "other", "z": 1},
-    }
-    draw_order = ["other", "closest", "farthest", "ref"]  # ref last -> always on top
-    shown_label = {k: False for k in style_map_local.keys()}
+    ax_w.plot(soh_interp, color=color, linewidth=lw, alpha=alpha, label=label)
 
-    fig_local, ax_local = plt.subplots(figsize=(10, 6))
-    for grp in draw_order:
-        for cn, cdict in interp_data_local.items():
-            if _group_for_cell(cn) != grp:
-                continue
-            y = np.asarray(cdict["SOH"], dtype=float)
-            if x_mode == "throughput":
-                x = np.asarray(cdict["time"], dtype=float)
-                xlabel = "Throughput"
-                fname_suffix = "throughput"
-            elif x_mode == "weeks":
-                if "weeks" not in cdict:
-                    continue
-                x = np.asarray(cdict["weeks"], dtype=float)
-                xlabel = "Weeks"
-                fname_suffix = "weeks"
-            else:
-                x = np.arange(len(y), dtype=float)
-                xlabel = "Step"
-                fname_suffix = "index"
-            st = style_map_local[grp]
-            label = st["label"] if not shown_label[grp] else None
-            shown_label[grp] = True
-            ax_local.plot(
-                x,
-                y,
-                color=st["color"],
-                linewidth=st["lw"],
-                alpha=st["alpha"],
-                label=label,
-                zorder=st["z"],
-            )
-
-    ax_local.set_xlabel(xlabel)
-    ax_local.set_ylabel("SOH")
-    ax_local.set_title(
-        f"SOH trajectories vs {xlabel} ({INTERP_METHOD} interp @ {TARGET_SOH_PLOT}, "
-        f"features @ {TARGET_SOH_FEATURES})"
-    )
-    ax_local.set_ylim(0.8, 1.05)
-    ax_local.grid(True, alpha=0.3)
-    ax_local.legend(loc="best")
-    fig_local.tight_layout()
-    fig_local.savefig(out_fig_dir / f"SOH_vs_{fname_suffix}_closest_farthest_{INTERP_METHOD}.png", dpi=150)
-    plt.show()
-
-
-_plot_soh_trajectories(interp_data, x_mode="index")
-_plot_soh_trajectories(interp_data, x_mode="throughput")
-_plot_soh_trajectories(interp_data, x_mode="weeks")
+ax_w.set_xlabel("Step")
+ax_w.set_ylabel("SOH")
+ax_w.set_title(
+    f"SOH trajectories ({INTERP_METHOD} interp @ {TARGET_SOH_PLOT}, "
+    f"features @ {TARGET_SOH_FEATURES})\n"
+    f"closest/farthest based on dQdV windowed features"
+)
+ax_w.set_ylim(0.8, 1.05)
+ax_w.grid(True, alpha=0.3)
+ax_w.legend(loc="best")
+fig_w.tight_layout()
+fig_w.savefig(out_fig_dir / f"SOH_vs_time_closest_farthest_{INTERP_METHOD}.png", dpi=150)
+plt.show()
 
 print(f"\nInterpolated {len(interp_data)} cells with features: {INTERP_FEATURES}")
 
@@ -888,7 +805,6 @@ for cell_name, cell_dict in interp_data.items():
 # =============================================================================
 PLOT_FEATURES = [
     "SOH",
-    "capacity",
     "mean_low_cha", "mean_mid_cha", "mean_high_cha", "mean_pla_cha",
     "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha",
 ]
@@ -2086,7 +2002,7 @@ else:
                     print(temp_rows[EXP_CONDS].to_string(index=False))
 
 # =============================================================================
-# STEP 7: MAKE DATASET FOR MODEL (CNN)
+# STEP 7: MAKE DATASET FOR MODEL (MLP, 8th-step input)
 # =============================================================================
 print("Loading data from interp_data dictionary ...")
 
@@ -2114,18 +2030,18 @@ for cell_name, cell_dict in interp_data.items():
         print(f"  [SKIP] {cell_name} — only {len(feat_mat)} steps, need {INPUT_STEPS}")
         continue
 
-    X_seq = feat_mat[:INPUT_STEPS, :]
-    if not np.all(np.isfinite(X_seq)):
+    X_vec = feat_mat[INPUT_STEPS - 1, :]
+    if not np.all(np.isfinite(X_vec)):
         print(f"  [SKIP] {cell_name} — non-finite values")
         continue
 
     if cell_name in TEST_NAMES:
-        test_X_list.append(X_seq)
+        test_X_list.append(X_vec)
         test_y_list.append(step_to_target)
         test_names_found.append(cell_name)
         print(f"  [TEST]  {cell_name}  step_target={step_to_target:.0f}")
     elif "cycle" in cell_name.lower():
-        train_X_list.append(X_seq)
+        train_X_list.append(X_vec)
         train_y_list.append(step_to_target)
         train_names.append(cell_name)
         print(f"  [TRAIN] {cell_name}  step_target={step_to_target:.0f}")
@@ -2139,7 +2055,7 @@ y_test = np.array(test_y_list)
 
 print(f"\nTrain: {X_train_all.shape[0]} cells,  Test: {X_test.shape[0]} cells")
 print(f"Features: {FEATURE_COLS}")
-print(f"Input shape per cell: ({INPUT_STEPS}, {INPUT_FEATURES})")
+print(f"Input shape per cell: ({INPUT_FEATURES},) from step index {INPUT_STEPS - 1}")
 
 
 # log-transform target
@@ -2194,7 +2110,7 @@ for i in random_numbers:
 
     set_seed(i)
 
-    model = TinyTemporalCNN(INPUT_FEATURES, INPUT_STEPS, dropout_rate=DROPOUT).to(device)
+    model = TinyStepMLP(INPUT_FEATURES, dropout_rate=DROPOUT).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LR)
     scheduler = ReduceLROnPlateau(optimizer, "min", patience=5, factor=0.5)
 
@@ -2205,7 +2121,7 @@ for i in random_numbers:
 
     save_dir = "savemodel"
     os.makedirs(save_dir, exist_ok=True)
-    best_model_path = os.path.join(save_dir, f"best_model_dqdv_{INTERP_METHOD}.pth")
+    best_model_path = os.path.join(save_dir, f"best_model_mlp_step{INPUT_STEPS}_{INTERP_METHOD}.pth")
 
     for epoch in range(EPOCHS + 1):
         if early_stop:
