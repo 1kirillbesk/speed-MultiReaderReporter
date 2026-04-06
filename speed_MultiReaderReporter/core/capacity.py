@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from csaps import csaps
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, peak_prominences
 
 import matplotlib.pyplot as plt
 from matplotlib import cm
@@ -322,6 +322,7 @@ def compute_checkup_point_step6(g: pd.DataFrame, *,
 # here, analyze the checkup part
 def extract_features(df,cell,cfg):
     features = {}
+    enable_discharge_ocv = bool(cfg.get("analysis", {}).get("enable_discharge_ocv", False))
     # dt = df["relative_time_s"].diff()
     # CU_num = [17, 2, 6, 9]
     proc = df["procedure"].astype(str)
@@ -340,8 +341,16 @@ def extract_features(df,cell,cfg):
             if last_token == "25":
                 choice = 2
 
-    ocv_cha_step = cfg['CU_steps']['ocv_cha'][choice]; ocv_dis_step = cfg['CU_steps']['ocv_dis'][choice]
-    capa_cha_step = cfg['CU_steps']['capa_cha'][choice]; capa_dis_step = cfg['CU_steps']['capa_dis'][choice]
+    cu_steps_cfg = cfg.get("CU_steps", {})
+    ocv_cha_steps = cu_steps_cfg.get("ocv_cha", [9, 22, 9])
+    ocv_dis_steps = cu_steps_cfg.get("ocv_dis", [6, 19, 6])
+    capa_cha_steps = cu_steps_cfg.get("capa_cha", [2, 15, 2])
+    capa_dis_steps = cu_steps_cfg.get("capa_dis", [11, 9, 12])
+
+    ocv_cha_step = ocv_cha_steps[choice]
+    ocv_dis_step = ocv_dis_steps[choice]
+    capa_cha_step = capa_cha_steps[choice]
+    capa_dis_step = capa_dis_steps[choice]
     mask_ocv_cha = ((df["step_int"] == ocv_cha_step) & rpt_mask)
     mask_ocv_dis = ((df["step_int"] == ocv_dis_step) & rpt_mask)
     mask_capa_cha = ((df["step_int"] == capa_cha_step) & rpt_mask)
@@ -352,42 +361,72 @@ def extract_features(df,cell,cfg):
 
     features['CU_time'] = df["abs_time"].iloc[0]
     features['cap_dis'] = df_capa_cha["qstep"].iloc[-1]; features['cap_cha'] = df_capa_cha["qstep"].iloc[-1]
-    features['cap_ocv_cha'] = df_ocv_cha["qstep"].iloc[-1]; features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1]
+    features['cap_ocv_cha'] = df_ocv_cha["qstep"].iloc[-1]
+    features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1] if (enable_discharge_ocv and not df_ocv_dis.empty) else np.nan
     # todo: make the input a list for shorter code
     # get the ICA info for feature extraction
     V_cha, dQdV_cha, Q_intcha = extract_ICA(df_ocv_cha, cell, cfg)
     features["Vcha"] = V_cha
     features["dQdVcha"] = dQdV_cha
     features["Q_intVcha"] = Q_intcha
-    V_dis, dQdV_dis, Q_intdis = extract_ICA(df_ocv_dis, cell, cfg)
-    features["Vdis"] = V_dis
-    features["dQdVdis"] = dQdV_dis
-    features["Q_intVdis"] = Q_intdis
+    V_dis = dQdV_dis = Q_intdis = None
+    if enable_discharge_ocv and (not df_ocv_dis.empty):
+        V_dis, dQdV_dis, Q_intdis = extract_ICA(df_ocv_dis, cell, cfg)
+        features["Vdis"] = V_dis
+        features["dQdVdis"] = dQdV_dis
+        features["Q_intVdis"] = Q_intdis
     # get DVA peaks
     Q_cha, dVdQ_cha, V_intcha = extract_DVA(df_ocv_cha, cell, cfg)
     features["Qcha"] = Q_cha
     features["dVdQcha"] = dVdQ_cha
     features["V_intQcha"] = V_intcha
-    Q_dis, dVdQ_dis, V_intdis = extract_DVA(df_ocv_dis, cell, cfg)
-    features["Qdis"] = Q_dis
-    features["dVdQdis"] = dVdQ_dis
-    features["V_intQdis"] = V_intdis
+    Q_dis = dVdQ_dis = V_intdis = None
+    if enable_discharge_ocv and (not df_ocv_dis.empty):
+        Q_dis, dVdQ_dis, V_intdis = extract_DVA(df_ocv_dis, cell, cfg)
+        features["Qdis"] = Q_dis
+        features["dVdQdis"] = dVdQ_dis
+        features["V_intQdis"] = V_intdis
 
-    p_ica_max_cha = get_peaks(V_cha, dQdV_cha, distance=50); p_dva_max_cha = get_peaks(Q_cha, dVdQ_cha, distance=50)
-    p_ica_min_cha = get_minima(V_cha, dQdV_cha, distance=50); p_dva_min_cha = get_minima(Q_cha, dVdQ_cha, distance=50)
+    peak_cfg = cfg.get("peak_selection", {}) if isinstance(cfg, dict) else {}
+    dist_pron = peak_cfg.get("distance_pronounced", 50)
+    prom_pron = peak_cfg.get("min_prominence", None)
+    width_pron = peak_cfg.get("min_width", None)
+    three_k = int(peak_cfg.get("window_top_k", 3))
 
-    p_ica_max_dis = get_peaks(V_dis, dQdV_dis, distance=50); p_dva_max_dis = get_peaks(Q_dis, dVdQ_dis, distance=50)
-    p_ica_min_dis = get_minima(V_dis, dQdV_dis, distance=50); p_dva_min_dis = get_minima(Q_dis, dVdQ_dis, distance=50)
-    # put this into features
-    features["peakV_max_cha"] = p_ica_max_cha["x_peaks"]; features["peakICA_max_cha"] = p_ica_max_cha["y_peaks"]
-    features["peakQ_max_cha"] = p_dva_max_cha["x_peaks"]; features["peakDVA_max_cha"] = p_dva_max_cha["y_peaks"]
-    features["peakV_min_cha"] = p_ica_min_cha["x_peaks"]; features["peakICA_min_cha"] = p_ica_min_cha["y_peaks"]
-    features["peakQ_min_cha"] = p_dva_min_cha["x_peaks"]; features["peakDVA_min_cha"] = p_dva_min_cha["y_peaks"]
+    cha_ica_ext = extrema_in_three_peak_window(
+        V_cha, dQdV_cha, distance=dist_pron, top_k_window=three_k, prominence=prom_pron, width=width_pron
+    )
+    cha_dva_ext = extrema_in_three_peak_window(
+        Q_cha, dVdQ_cha, distance=dist_pron, top_k_window=three_k, prominence=prom_pron, width=width_pron
+    )
 
-    features["peakV_max_dis"] = p_ica_max_dis["x_peaks"]; features["peakICA_max_dis"] = p_ica_max_dis["y_peaks"]
-    features["peakQ_max_dis"] = p_dva_max_dis["x_peaks"]; features["peakDVA_max_dis"] = p_dva_max_dis["y_peaks"]
-    features["peakV_min_dis"] = p_ica_min_dis["x_peaks"]; features["peakICA_min_dis"] = p_ica_min_dis["y_peaks"]
-    features["peakQ_min_dis"] = p_dva_min_dis["x_peaks"]; features["peakDVA_min_dis"] = p_dva_min_dis["y_peaks"]
+    features["peakV_max_cha"] = cha_ica_ext["max"]["x_peaks"]; features["peakICA_max_cha"] = cha_ica_ext["max"]["y_peaks"]
+    features["peakQ_max_cha"] = cha_dva_ext["max"]["x_peaks"]; features["peakDVA_max_cha"] = cha_dva_ext["max"]["y_peaks"]
+    features["peakV_min_cha"] = cha_ica_ext["min"]["x_peaks"]; features["peakICA_min_cha"] = cha_ica_ext["min"]["y_peaks"]
+    features["peakQ_min_cha"] = cha_dva_ext["min"]["x_peaks"]; features["peakDVA_min_cha"] = cha_dva_ext["min"]["y_peaks"]
+
+    # Keep compatibility fields but enforce the same single max/min rule.
+    features["pr_peakV_max_cha"] = cha_ica_ext["max"]["x_peaks"]; features["pr_peakICA_max_cha"] = cha_ica_ext["max"]["y_peaks"]
+    features["pr_peakV_min_cha"] = cha_ica_ext["min"]["x_peaks"]; features["pr_peakICA_min_cha"] = cha_ica_ext["min"]["y_peaks"]
+    features["pr_peakQ_max_cha"] = cha_dva_ext["max"]["x_peaks"]; features["pr_peakDVA_max_cha"] = cha_dva_ext["max"]["y_peaks"]
+    features["pr_peakQ_min_cha"] = cha_dva_ext["min"]["x_peaks"]; features["pr_peakDVA_min_cha"] = cha_dva_ext["min"]["y_peaks"]
+
+    if enable_discharge_ocv and V_dis is not None and Q_dis is not None:
+        dis_ica_ext = extrema_in_three_peak_window(
+            V_dis, dQdV_dis, distance=dist_pron, top_k_window=three_k, prominence=prom_pron, width=width_pron
+        )
+        dis_dva_ext = extrema_in_three_peak_window(
+            Q_dis, dVdQ_dis, distance=dist_pron, top_k_window=three_k, prominence=prom_pron, width=width_pron
+        )
+        features["peakV_max_dis"] = dis_ica_ext["max"]["x_peaks"]; features["peakICA_max_dis"] = dis_ica_ext["max"]["y_peaks"]
+        features["peakQ_max_dis"] = dis_dva_ext["max"]["x_peaks"]; features["peakDVA_max_dis"] = dis_dva_ext["max"]["y_peaks"]
+        features["peakV_min_dis"] = dis_ica_ext["min"]["x_peaks"]; features["peakICA_min_dis"] = dis_ica_ext["min"]["y_peaks"]
+        features["peakQ_min_dis"] = dis_dva_ext["min"]["x_peaks"]; features["peakDVA_min_dis"] = dis_dva_ext["min"]["y_peaks"]
+
+        features["pr_peakV_max_dis"] = dis_ica_ext["max"]["x_peaks"]; features["pr_peakICA_max_dis"] = dis_ica_ext["max"]["y_peaks"]
+        features["pr_peakV_min_dis"] = dis_ica_ext["min"]["x_peaks"]; features["pr_peakICA_min_dis"] = dis_ica_ext["min"]["y_peaks"]
+        features["pr_peakQ_max_dis"] = dis_dva_ext["max"]["x_peaks"]; features["pr_peakDVA_max_dis"] = dis_dva_ext["max"]["y_peaks"]
+        features["pr_peakQ_min_dis"] = dis_dva_ext["min"]["x_peaks"]; features["pr_peakDVA_min_dis"] = dis_dva_ext["min"]["y_peaks"]
 
     # get the thermal features
     # V_disT, dTdV_dis, T_intV = extract_ITA(df_capa_dis, cell, cfg)
@@ -404,9 +443,14 @@ def extract_ICA(df,cell,cfg):
     q = np.asarray(df["qstep"], dtype=float)
     current_rate = df["current_A"].iloc[10]
 
+    # Use separate voltage limits for discharge when available.
+    vol_cha = cfg.get("voltage", {})
+    vol_dis = cfg.get("voltage_dis", vol_cha)
+    lim_cfg = vol_cha if current_rate > 0 else vol_dis
+
     dV = np.diff(V)
     not_increasing = dV <= 0; not_decreasing = dV >= 0
-    above_threshold = V[1:] > cfg['voltage']['uplim']; below_threshold = V[1:] < cfg['voltage']['downlim']
+    above_threshold = V[1:] > lim_cfg['uplim']; below_threshold = V[1:] < lim_cfg['downlim']
     if current_rate > 0:
         stop_idx = np.where(not_increasing & above_threshold)[0]
     else:
@@ -428,8 +472,14 @@ def extract_ICA(df,cell,cfg):
     except ValueError as e:
         print(f"[WARN] {cell} RPT skipped (DVA): {e}")
 
-    V_100, dQdV_100, Q_intV = resample_to_n(V_fine_ica, dQdV_smooth, Q_fine_ica,
-                                            x_lo=cfg['voltage']['downlim'], x_hi=cfg['voltage']['uplim'], n=1000)
+    V_100, dQdV_100, Q_intV = resample_to_n(
+        V_fine_ica,
+        dQdV_smooth,
+        Q_fine_ica,
+        x_lo=lim_cfg['downlim'],
+        x_hi=lim_cfg['uplim'],
+        n=1000,
+    )
 
     return V_100, dQdV_100, Q_intV
 
@@ -439,9 +489,13 @@ def extract_DVA(df,cell,cfg):
     q = np.asarray(df["qstep"], dtype=float)
     current_rate = df["current_A"].iloc[10]
 
+    vol_cha = cfg.get("voltage", {})
+    vol_dis = cfg.get("voltage_dis", vol_cha)
+    lim_cfg = vol_cha if current_rate > 0 else vol_dis
+
     dV = np.diff(V)
     not_increasing = dV <= 0; not_decreasing = dV >= 0
-    above_threshold = V[1:] > cfg['voltage']['uplim']; below_threshold = V[1:] < cfg['voltage']['downlim']
+    above_threshold = V[1:] > lim_cfg['uplim']; below_threshold = V[1:] < lim_cfg['downlim']
     if current_rate > 0:
         stop_idx = np.where(not_increasing & above_threshold)[0]
     else:
@@ -473,9 +527,13 @@ def extract_ITA(df,cell,cfg):
     T = np.asarray(df["T1"], dtype=float)
     current_rate = df["current_A"].iloc[10]
 
+    vol_cha = cfg.get("voltage", {})
+    vol_dis = cfg.get("voltage_dis", vol_cha)
+    lim_cfg = vol_cha if current_rate > 0 else vol_dis
+
     dV = np.diff(V)
     not_increasing = dV <= 0; not_decreasing = dV >= 0
-    above_threshold = V[1:] > cfg['voltage']['uplim']; below_threshold = V[1:] < cfg['voltage']['downlim']
+    above_threshold = V[1:] > lim_cfg['uplim']; below_threshold = V[1:] < lim_cfg['downlim']
     if current_rate > 0:
         stop_idx = np.where(not_increasing & above_threshold)[0]
     else:
@@ -497,8 +555,14 @@ def extract_ITA(df,cell,cfg):
     except ValueError as e:
         print(f"[WARN] {cell} RPT skipped (DVA): {e}")
 
-    V_100, dTdV_100, T_intV = resample_to_n(V_fine_ica, dTdV_smooth, T_fine_ica,
-                                            x_lo=cfg['voltage']['downlim'], x_hi=cfg['voltage']['uplim'], n=1000)
+    V_100, dTdV_100, T_intV = resample_to_n(
+        V_fine_ica,
+        dTdV_smooth,
+        T_fine_ica,
+        x_lo=lim_cfg['downlim'],
+        x_hi=lim_cfg['uplim'],
+        n=1000,
+    )
 
     return V_100, dTdV_100, T_intV
 
@@ -548,6 +612,35 @@ def window_delta_mean_var(
     return mean, var
 
 
+def compute_window_feature_set(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    windows: dict,
+    prefix: str,
+    baseline_idx: int = 0,
+):
+    """
+    Compute mean/var delta features for multiple windows at once.
+    windows: {"tag": (x_lo, x_hi), ...}
+    output keys: mean_{prefix}_{tag}, var_{prefix}_{tag}
+    """
+    out = {}
+    for tag, bounds in windows.items():
+        x_lo, x_hi = bounds
+        m, v = window_delta_mean_var(
+            df,
+            x_col=x_col,
+            y_col=y_col,
+            x_lo=float(x_lo),
+            x_hi=float(x_hi),
+            baseline_idx=baseline_idx,
+        )
+        out[f"mean_{prefix}_{tag}"] = m
+        out[f"var_{prefix}_{tag}"] = v
+    return out
+
+
 def get_peaks(x, y, distance=None):
     x = np.asarray(x).ravel()
     y = np.asarray(y).ravel()
@@ -582,6 +675,80 @@ def get_minima(x, y, distance=None):
         "properties": properties
     }
 
+
+def _most_pronounced_core(
+    x,
+    y,
+    *,
+    distance=None,
+    top_k=3,
+    minima=False,
+    prominence=None,
+    width=None,
+):
+    """
+    Peak picker ranked by prominence (robust when early peaks fade/shift).
+    """
+    x = np.asarray(x).ravel()
+    y = np.asarray(y).ravel()
+    if x.shape[0] != y.shape[0]:
+        raise ValueError(f"x and y must have same length. Got {len(x)} and {len(y)}")
+
+    y_work = -y if minima else y
+    idx, props = find_peaks(y_work, distance=distance, prominence=prominence, width=width)
+    if idx.size == 0:
+        return {
+            "idx": idx,
+            "x_peaks": x[idx],
+            "y_peaks": y[idx],
+            "prominence": np.array([], dtype=float),
+            "properties": props,
+        }
+
+    prom = peak_prominences(y_work, idx)[0]
+    order = np.argsort(prom)[::-1]
+    if top_k is not None and int(top_k) > 0:
+        order = order[: int(top_k)]
+    idx_sel = idx[order]
+    prom_sel = prom[order]
+
+    # Keep selected peaks ordered by x for readability
+    ord_x = np.argsort(x[idx_sel])
+    idx_sel = idx_sel[ord_x]
+    prom_sel = prom_sel[ord_x]
+
+    return {
+        "idx": idx_sel,
+        "x_peaks": x[idx_sel],
+        "y_peaks": y[idx_sel],
+        "prominence": prom_sel,
+        "properties": props,
+    }
+
+
+def get_most_pronounced_peaks(x, y, distance=None, top_k=3, prominence=None, width=None):
+    return _most_pronounced_core(
+        x,
+        y,
+        distance=distance,
+        top_k=top_k,
+        minima=False,
+        prominence=prominence,
+        width=width,
+    )
+
+
+def get_most_pronounced_minima(x, y, distance=None, top_k=3, prominence=None, width=None):
+    return _most_pronounced_core(
+        x,
+        y,
+        distance=distance,
+        top_k=top_k,
+        minima=True,
+        prominence=prominence,
+        width=width,
+    )
+
 def topk_by_y(xp, yp, k, largest=True):
     """
     Select top-k peaks by y value.
@@ -608,6 +775,72 @@ def topk_by_y(xp, yp, k, largest=True):
     # sort selected points by x (prettier)
     idx = idx[np.argsort(xp[idx])]
     return xp[idx], yp[idx]
+
+def extrema_in_three_peak_window(
+    x,
+    y,
+    *,
+    distance=50,
+    top_k_window=3,
+    prominence=None,
+    width=None,
+):
+    """
+    Keep only ONE maximum and ONE minimum inside the x-window spanned by
+    the most pronounced `top_k_window` maxima.
+    """
+    x = np.asarray(x).ravel()
+    y = np.asarray(y).ravel()
+    if x.shape[0] != y.shape[0] or x.size == 0:
+        empty = np.array([], dtype=float)
+        return {"max": {"x_peaks": empty, "y_peaks": empty}, "min": {"x_peaks": empty, "y_peaks": empty}}
+
+    core = get_most_pronounced_peaks(
+        x,
+        y,
+        distance=distance,
+        top_k=top_k_window,
+        prominence=prominence,
+        width=width,
+    )
+    if core["x_peaks"].size >= 2:
+        lo = float(np.min(core["x_peaks"]))
+        hi = float(np.max(core["x_peaks"]))
+    else:
+        lo = float(np.nanmin(x))
+        hi = float(np.nanmax(x))
+
+    pmax = get_peaks(x, y, distance=distance)
+    pmin = get_minima(x, y, distance=distance)
+
+    max_mask = (pmax["x_peaks"] >= lo) & (pmax["x_peaks"] <= hi)
+    min_mask = (pmin["x_peaks"] >= lo) & (pmin["x_peaks"] <= hi)
+
+    x_max = pmax["x_peaks"][max_mask]
+    y_max = pmax["y_peaks"][max_mask]
+    x_min = pmin["x_peaks"][min_mask]
+    y_min = pmin["y_peaks"][min_mask]
+
+    if y_max.size > 0:
+        i_max = int(np.argmax(y_max))
+        x_max = np.array([x_max[i_max]], dtype=float)
+        y_max = np.array([y_max[i_max]], dtype=float)
+    else:
+        x_max = np.array([], dtype=float)
+        y_max = np.array([], dtype=float)
+
+    if y_min.size > 0:
+        i_min = int(np.argmin(y_min))
+        x_min = np.array([x_min[i_min]], dtype=float)
+        y_min = np.array([y_min[i_min]], dtype=float)
+    else:
+        x_min = np.array([], dtype=float)
+        y_min = np.array([], dtype=float)
+
+    return {
+        "max": {"x_peaks": x_max, "y_peaks": y_max},
+        "min": {"x_peaks": x_min, "y_peaks": y_min},
+    }
 
 # here, analyze the throughput part
 def compute_cum_abs_charge(df, time_col="abs_time", current_col="current_A"):

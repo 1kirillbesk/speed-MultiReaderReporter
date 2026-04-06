@@ -25,6 +25,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
 from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
+from sklearn.preprocessing import StandardScaler
 from analyze_linear_prediction import build_regression_table_cap93_and_var_at_thr
 import xgboost as xgb
 from sklearn.metrics import r2_score
@@ -48,7 +49,8 @@ interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature
 out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
 out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-REF_NAMES = ["SPEED_LW_reference_16", "SPEED_LW_reference_17", "SPEED_LW_reference_18"]
+REF_NAMES = ["SPEED_LW_reference_13", "SPEED_LW_reference_14", "SPEED_LW_reference_15"]
+LOADED_REF_NAMES = [f"SPEED_LW_reference_{i}" for i in range(1, 19)]
 
 x_col = "Vcha"
 y_col = "dQdVcha"
@@ -59,12 +61,13 @@ v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
 TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.93
+SOH_STEP_TARGET = 0.955
 FEATURE_STEP_LOGLOG = 8
-THROUGHPUT_FEATURE_LOGLOG = 2000000.0 / 3600.0 / 3.4
-SOH_THROUGHPUT_TARGET = 0.93
+THROUGHPUT_FEATURE_LOGLOG = 2000000.0 / 3600.0
+THROUGHPUT_CNN_INPUT_TARGET_AH = 500.0
+SOH_THROUGHPUT_TARGET = 0.955
 EXTRAPOLATE_SOH_TARGET_IF_NOT_REACHED = False
-REF_IGNORE_FIRST_WEEK = True
+REF_IGNORE_FIRST_WEEK = False
 REF_IGNORE_WEEKS_LE = 1.0
 
 K_CLOSEST = 20
@@ -73,8 +76,11 @@ PRINT_CLOSEST_EXISTING = False
 TOP_TEMPS = [40, 25, 15]
 TOP_PER_TEMP = 10
 
-# Choose interpolation method here
-INTERP_METHOD = "linear"      # options: "linear" or "cubic"
+# Choose interpolation method here.
+# Valid options:
+#   "linear" -> np.interp
+#   "cubic"  -> CubicSpline with linear fallback when there are too few points
+INTERP_METHOD = "linear"
 
 INTERP_FEATURES = [
     "mean_low_cha", "mean_mid_cha", "mean_high_cha", "mean_pla_cha",
@@ -93,24 +99,27 @@ exp_conditions = {}
 traj_by_cell_reg = {}
 
 # Model config
-FEATURE_COLS = ["SOH", "capacity", "var_low_cha", "var_mid_cha", "var_high_cha", "var_pla_cha", "mean_pla_cha"]
+FEATURE_COLS = ["SOH", "var_mid_cha", "var_high_cha", "var_pla_cha","var_low_cha",
+                "mean_high_cha", "mean_pla_cha"]
 INPUT_STEPS = 8
 INPUT_FEATURES = len(FEATURE_COLS)
 
-TEST_NAMES = [
-    "SPEED_LW_reference_16",
-    "SPEED_LW_reference_17",
-    "SPEED_LW_reference_18",
-]
+TEST_NAMES = list(LOADED_REF_NAMES)
 
-EPOCHS = 500
+EPOCHS = 300
 BATCH_SIZE = 8
 LR = 0.001
 DROPOUT = 0.1
 VALIDATION_SPLIT = 0.2
 USE_VALIDATION = True
-N_SEEDS = 10
+N_SEEDS = 5
 INITIAL_CAP_HIST_BINS = 18
+TARGET_LOG_DIVISOR = 10.0
+TARGET_TRANSFORM_LABEL = f"log(real_value / {TARGET_LOG_DIVISOR:g})"
+RAW_TARGET_LOG_DIVISOR = 100.0
+RAW_TARGET_TRANSFORM_LABEL = f"log(real_value / {RAW_TARGET_LOG_DIVISOR:g})"
+SOH_PLOT_YMIN = 0.8
+SOH_PLOT_YMAX = 1.05
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 mse_loss = nn.MSELoss()
@@ -158,7 +167,14 @@ def clean_xy_for_interp(x, y):
     return x, y
 
 
-def interp_1d(x_old, y_old, x_new, method="linear"):
+def resolve_interp_method(method=None):
+    method_eff = INTERP_METHOD if method is None else str(method).strip().lower()
+    if method_eff not in {"linear", "cubic"}:
+        raise ValueError("method must be 'linear' or 'cubic'")
+    return method_eff
+
+
+def interp_1d(x_old, y_old, x_new, method=None):
     """
     1D interpolation with selectable method:
     - linear: np.interp
@@ -170,10 +186,12 @@ def interp_1d(x_old, y_old, x_new, method="linear"):
 
     x_new = np.asarray(x_new, dtype=float)
 
-    if method == "linear":
+    method_eff = resolve_interp_method(method)
+
+    if method_eff == "linear":
         return np.interp(x_new, x_old, y_old)
 
-    if method == "cubic":
+    if method_eff == "cubic":
         # Need at least 3 points for cubic spline
         if len(x_old) < 3:
             return np.interp(x_new, x_old, y_old)
@@ -193,7 +211,7 @@ def interp_1d(x_old, y_old, x_new, method="linear"):
     raise ValueError("method must be 'linear' or 'cubic'")
 
 
-def interp_value_at_target(x, y, x_target, method="linear"):
+def interp_value_at_target(x, y, x_target, method=None):
     """
     Interpolate scalar y-value at x_target.
     """
@@ -203,7 +221,7 @@ def interp_value_at_target(x, y, x_target, method="linear"):
     return float(y_interp[0])
 
 
-def interp_value_with_optional_extrapolation(x, y, x_target, method="linear", allow_extrapolation=False):
+def interp_value_with_optional_extrapolation(x, y, x_target, method=None, allow_extrapolation=False):
     """
     Interpolate scalar y-value at x_target.
     If x_target is outside data range and allow_extrapolation=True,
@@ -275,10 +293,824 @@ def mape_on_references_from_log_fit(coeffs, ref_log_x, ref_log_y_true, ref_y_tru
     return mape_log, mape_orig
 
 
-def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="linear", throughput_max=None):
+def fit_log_target_transform(y, divisor=TARGET_LOG_DIVISOR):
+    y_arr = np.asarray(y, dtype=float)
+    if not np.all(np.isfinite(y_arr)):
+        raise ValueError("Target values must be finite for log transform.")
+    if np.any(y_arr <= 0):
+        raise ValueError("Target values must be > 0 for log transform.")
+    if float(divisor) <= 0:
+        raise ValueError("Log target divisor must be > 0.")
+    return {"divisor": float(divisor)}
+
+
+def transform_log_target(y, transform_cfg):
+    y_arr = np.asarray(y, dtype=float)
+    if not np.all(np.isfinite(y_arr)):
+        raise ValueError("Target values must be finite for log transform.")
+    if np.any(y_arr <= 0):
+        raise ValueError("Target values must be > 0 for log transform.")
+    divisor = float(transform_cfg["divisor"])
+    return np.log(y_arr / divisor)
+
+
+def inverse_log_target(y_scaled, transform_cfg):
+    y_arr = np.asarray(y_scaled, dtype=float)
+    divisor = float(transform_cfg["divisor"])
+    return np.exp(y_arr) * divisor
+
+
+def scale_temporal_features_except(
+    X_train,
+    X_other=None,
+    *,
+    feature_names=None,
+    exclude_features=("SOH", "capacity"),
+):
+    """
+    Standardize selected temporal feature channels over all samples/timesteps.
+    Excluded channels are left unchanged.
+    The scaler is fit on X_train only and then applied to any additional arrays.
+    """
+    X_train = np.asarray(X_train, dtype=float)
+    if X_train.ndim != 3:
+        raise ValueError("X_train must have shape (n_samples, n_steps, n_features).")
+
+    if feature_names is None:
+        feature_names = [str(i) for i in range(X_train.shape[2])]
+
+    feature_names = list(feature_names)
+    exclude_set = {str(name) for name in exclude_features}
+    scale_idx = [idx for idx, name in enumerate(feature_names) if str(name) not in exclude_set]
+
+    def _apply(arr, scaler_obj):
+        arr = np.asarray(arr, dtype=float).copy()
+        flat = arr.reshape(-1, arr.shape[2])
+        flat_scaled = flat.copy()
+        if scale_idx:
+            flat_scaled[:, scale_idx] = scaler_obj.transform(flat[:, scale_idx])
+        return flat_scaled.reshape(arr.shape)
+
+    if not scale_idx:
+        outputs = [X_train.copy()]
+        if X_other is not None:
+            outputs.extend(np.asarray(arr, dtype=float).copy() for arr in X_other)
+        return outputs, None
+
+    scaler = StandardScaler()
+    flat_train = X_train.reshape(-1, X_train.shape[2])
+    scaler.fit(flat_train[:, scale_idx])
+
+    outputs = [_apply(X_train, scaler)]
+    if X_other is not None:
+        outputs.extend(_apply(arr, scaler) for arr in X_other)
+    return outputs, scaler
+
+
+def build_raw_throughput_sequence(feat_dict, feature_cols, n_steps, throughput_target, method=None):
+    """
+    Build a fixed-length temporal feature sequence from raw (pre-interpolation) data
+    by interpolating each feature onto a throughput grid up to throughput_target.
+    """
+    thr = np.asarray(feat_dict.get("throughput", []), dtype=float)
+    if len(thr) < 2 or not np.all(np.isfinite(thr)):
+        return None
+
+    thr_min = float(np.nanmin(thr))
+    thr_max = float(np.nanmax(thr))
+    if not (thr_min <= float(throughput_target) <= thr_max):
+        return None
+
+    t_grid = np.linspace(thr_min, float(throughput_target), int(n_steps))
+    feat_cols = []
+
+    cap = np.asarray(feat_dict.get("capacity", []), dtype=float)
+    soh_from_cap = None
+    if len(cap) >= 2 and np.isfinite(cap[0]) and cap[0] != 0:
+        soh_from_cap = cap / cap[0]
+
+    for col in feature_cols:
+        if col == "SOH":
+            arr = soh_from_cap
+        else:
+            arr = np.asarray(feat_dict.get(col, []), dtype=float) if col in feat_dict else None
+
+        if arr is None:
+            return None
+
+        n = min(len(thr), len(arr))
+        if n < 2:
+            return None
+
+        y_new = interp_1d(thr[:n], arr[:n], t_grid, method=method)
+        if y_new is None or len(y_new) != len(t_grid) or not np.all(np.isfinite(y_new)):
+            return None
+
+        feat_cols.append(np.asarray(y_new, dtype=float))
+
+    if len(feat_cols) != len(feature_cols):
+        return None
+
+    return np.stack(feat_cols, axis=1)
+
+
+def _interp_or_extrap_1d_at_x(x, y, x_target):
+    """
+    Interpolate y(x_target). If outside x-range, linearly extrapolate using edge segment.
+    """
+    x_clean, y_clean = clean_xy_for_interp(x, y)
+    if x_clean is None or y_clean is None or len(x_clean) < 2:
+        return None
+
+    x_target = float(x_target)
+    x_min = float(x_clean[0])
+    x_max = float(x_clean[-1])
+
+    if x_min <= x_target <= x_max:
+        return float(np.interp(x_target, x_clean, y_clean))
+
+    if x_target < x_min:
+        x0, x1 = float(x_clean[0]), float(x_clean[1])
+        y0, y1 = float(y_clean[0]), float(y_clean[1])
+    else:
+        x0, x1 = float(x_clean[-2]), float(x_clean[-1])
+        y0, y1 = float(y_clean[-2]), float(y_clean[-1])
+
+    dx = x1 - x0
+    if abs(dx) < 1e-12:
+        return None
+    slope = (y1 - y0) / dx
+    return float(y0 + slope * (x_target - x0))
+
+
+def throughput_target_to_step(cell_dict, throughput_target):
+    if cell_dict is None or "time" not in cell_dict or "SOH" not in cell_dict:
+        return None
+
+    thru_axis = np.asarray(cell_dict["time"], dtype=float)
+    step_axis = np.arange(len(np.asarray(cell_dict["SOH"], dtype=float)), dtype=float)
+    n = min(len(thru_axis), len(step_axis))
+    if n < 2:
+        return None
+    return _interp_or_extrap_1d_at_x(thru_axis[:n], step_axis[:n], float(throughput_target))
+
+
+def plot_prediction_soh_context(
+    cell_name,
+    cell_dict,
+    pred_step_to_target,
+    true_step_to_target=None,
+    model_tag="interp",
+):
+    """
+    Plot SOH trajectory used for prediction and mark:
+      - red vertical line where available data ends
+      - red cross at predicted end-of-life (SOH target)
+    Also add throughput-position marker when throughput axis is available.
+    """
+    if cell_dict is None or "SOH" not in cell_dict:
+        return
+
+    soh = np.asarray(cell_dict["SOH"], dtype=float)
+    if len(soh) < 2 or not np.all(np.isfinite(soh)):
+        return
+
+    step_axis = np.arange(len(soh), dtype=float)
+    data_stop_step = float(step_axis[-1])
+    pred_step = float(pred_step_to_target)
+    eol_soh = float(SOH_STEP_TARGET)
+
+    has_throughput = "time" in cell_dict and len(np.asarray(cell_dict["time"], dtype=float)) == len(soh)
+    if has_throughput:
+        thru_axis = np.asarray(cell_dict["time"], dtype=float)
+        ncols = 2
+        figsize = (13, 4.8)
+    else:
+        thru_axis = None
+        ncols = 1
+        figsize = (6.8, 4.8)
+
+    fig, axes = plt.subplots(1, ncols, figsize=figsize)
+    if ncols == 1:
+        axes = [axes]
+
+    ax_step = axes[0]
+    ax_step.plot(step_axis, soh, color="steelblue", linewidth=1.8, alpha=0.95, label="SOH used")
+    ax_step.axvline(data_stop_step, color="red", linestyle="--", linewidth=1.2, label="data stop")
+    ax_step.scatter([pred_step], [eol_soh], color="red", marker="x", s=80, linewidths=2.0, zorder=6, label="pred EOL")
+    if true_step_to_target is not None and np.isfinite(true_step_to_target):
+        ax_step.scatter([float(true_step_to_target)], [eol_soh], color="black", marker="o", s=28, zorder=6, label="true EOL")
+    ax_step.set_xlabel("Step number")
+    ax_step.set_ylabel("SOH")
+    ax_step.set_title(f"{cell_name} | EOL on step axis")
+    ax_step.grid(True, alpha=0.3)
+    ax_step.set_ylim(min(0.75, np.nanmin(soh) - 0.03), 1.03)
+    ax_step.legend(loc="best", fontsize=8)
+
+    ax_step.annotate(
+        f"pred step={pred_step:.1f}",
+        xy=(pred_step, eol_soh),
+        xytext=(8, 6),
+        textcoords="offset points",
+        fontsize=8,
+        color="red",
+    )
+    if true_step_to_target is not None and np.isfinite(true_step_to_target):
+        ax_step.annotate(
+            f"true step={float(true_step_to_target):.1f}",
+            xy=(float(true_step_to_target), eol_soh),
+            xytext=(8, -12),
+            textcoords="offset points",
+            fontsize=8,
+            color="black",
+        )
+
+    if has_throughput:
+        ax_thr = axes[1]
+        data_stop_thr = float(thru_axis[-1])
+        pred_thr = _interp_or_extrap_1d_at_x(step_axis, thru_axis, pred_step)
+        true_thr = None
+        if true_step_to_target is not None and np.isfinite(true_step_to_target):
+            true_thr = _interp_or_extrap_1d_at_x(step_axis, thru_axis, float(true_step_to_target))
+
+        ax_thr.plot(thru_axis, soh, color="steelblue", linewidth=1.8, alpha=0.95, label="SOH used")
+        ax_thr.axvline(data_stop_thr, color="red", linestyle="--", linewidth=1.2, label="data stop")
+        if pred_thr is not None and np.isfinite(pred_thr):
+            ax_thr.scatter([pred_thr], [eol_soh], color="red", marker="x", s=80, linewidths=2.0, zorder=6, label="pred EOL")
+            ax_thr.annotate(
+                f"pred thr={pred_thr:.1f}",
+                xy=(pred_thr, eol_soh),
+                xytext=(8, 6),
+                textcoords="offset points",
+                fontsize=8,
+                color="red",
+            )
+        if true_thr is not None and np.isfinite(true_thr):
+            ax_thr.scatter([true_thr], [eol_soh], color="black", marker="o", s=28, zorder=6, label="true EOL")
+            ax_thr.annotate(
+                f"true thr={true_thr:.1f}",
+                xy=(true_thr, eol_soh),
+                xytext=(8, -12),
+                textcoords="offset points",
+                fontsize=8,
+                color="black",
+            )
+
+        ax_thr.set_xlabel("Throughput [Ah]")
+        ax_thr.set_ylabel("SOH")
+        ax_thr.set_title(f"{cell_name} | EOL on throughput axis")
+        ax_thr.grid(True, alpha=0.3)
+        ax_thr.set_ylim(min(0.75, np.nanmin(soh) - 0.03), 1.03)
+        ax_thr.legend(loc="best", fontsize=8)
+
+    fig.suptitle(
+        f"SOH data used for prediction ({model_tag}, target SOH={SOH_STEP_TARGET})",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+    plt.close(fig)
+
+
+def plot_prediction_soh_context_group(
+    cell_names,
+    interp_data_local,
+    pred_step_to_target,
+    true_step_to_target=None,
+    model_tag="interp",
+):
+    if len(cell_names) == 0:
+        return
+
+    pred_step_arr = np.asarray(pred_step_to_target, dtype=float)
+    if true_step_to_target is None:
+        true_step_arr = np.full(len(cell_names), np.nan, dtype=float)
+    else:
+        true_step_arr = np.asarray(true_step_to_target, dtype=float)
+
+    valid_rows = []
+    for idx, cell_name in enumerate(cell_names):
+        cell_dict = interp_data_local.get(cell_name)
+        if cell_dict is None or "SOH" not in cell_dict:
+            continue
+        soh = np.asarray(cell_dict["SOH"], dtype=float)
+        if len(soh) < 2 or not np.all(np.isfinite(soh)):
+            continue
+        valid_rows.append((cell_name, cell_dict, soh, float(pred_step_arr[idx]), float(true_step_arr[idx])))
+
+    if len(valid_rows) == 0:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14.5, 5.8), squeeze=False)
+    ax_step = axes[0, 0]
+    ax_thr = axes[0, 1]
+    eol_soh = float(SOH_STEP_TARGET)
+    cmap = plt.cm.get_cmap("tab20", max(len(valid_rows), 1))
+    step_ylim_min = 1.0
+    thr_ylim_min = 1.0
+
+    for row_idx, (cell_name, cell_dict, soh, pred_step, true_step) in enumerate(valid_rows):
+        step_axis = np.arange(len(soh), dtype=float)
+        data_stop_step = float(step_axis[-1])
+        cell_color = cmap(row_idx)
+        step_ylim_min = min(step_ylim_min, float(np.nanmin(soh) - 0.03))
+
+        ax_step.plot(step_axis, soh, color=cell_color, linewidth=1.5, alpha=0.9, label=cell_name)
+        ax_step.axvline(
+            data_stop_step,
+            color=cell_color,
+            linestyle="--",
+            linewidth=0.9,
+            alpha=0.35,
+        )
+        ax_step.scatter([pred_step], [eol_soh], color=cell_color, marker="x", s=55, linewidths=1.8, zorder=6)
+        if np.isfinite(true_step):
+            ax_step.scatter([true_step], [eol_soh], color=cell_color, facecolors="none", marker="o", s=40, zorder=6)
+
+        has_throughput = "time" in cell_dict and len(np.asarray(cell_dict["time"], dtype=float)) == len(soh)
+        if not has_throughput:
+            continue
+
+        thru_axis = np.asarray(cell_dict["time"], dtype=float)
+        data_stop_thr = float(thru_axis[-1])
+        pred_thr = _interp_or_extrap_1d_at_x(step_axis, thru_axis, pred_step)
+        true_thr = _interp_or_extrap_1d_at_x(step_axis, thru_axis, true_step) if np.isfinite(true_step) else None
+
+        thr_ylim_min = min(thr_ylim_min, float(np.nanmin(soh) - 0.03))
+        ax_thr.plot(thru_axis, soh, color=cell_color, linewidth=1.5, alpha=0.9, label=cell_name)
+        ax_thr.axvline(
+            data_stop_thr,
+            color=cell_color,
+            linestyle="--",
+            linewidth=0.9,
+            alpha=0.35,
+        )
+        if pred_thr is not None and np.isfinite(pred_thr):
+            ax_thr.scatter([pred_thr], [eol_soh], color=cell_color, marker="x", s=55, linewidths=1.8, zorder=6)
+        if true_thr is not None and np.isfinite(true_thr):
+            ax_thr.scatter([true_thr], [eol_soh], color=cell_color, facecolors="none", marker="o", s=40, zorder=6)
+
+    ax_step.set_xlabel("Step number")
+    ax_step.set_ylabel("SOH")
+    ax_step.set_title("All cells | EOL on step axis")
+    ax_step.grid(True, alpha=0.3)
+    ax_step.set_ylim(min(0.75, step_ylim_min), 1.03)
+
+    ax_thr.set_xlabel("Throughput [Ah]")
+    ax_thr.set_ylabel("SOH")
+    ax_thr.set_title("All cells | EOL on throughput axis")
+    ax_thr.grid(True, alpha=0.3)
+    ax_thr.set_ylim(min(0.75, thr_ylim_min), 1.03)
+
+    step_marker_handles = [
+        Line2D([0], [0], color="dimgray", linestyle="-", linewidth=1.5, label="SOH trajectory"),
+        Line2D([0], [0], color="dimgray", linestyle="--", linewidth=1.0, alpha=0.5, label="data stop"),
+        Line2D([0], [0], color="dimgray", marker="x", linestyle="None", markersize=7, markeredgewidth=1.6, label="pred EOL"),
+        Line2D([0], [0], color="dimgray", marker="o", linestyle="None", markersize=6, markerfacecolor="none", label="true EOL"),
+    ]
+    ax_step.legend(handles=step_marker_handles, loc="lower left", fontsize=8)
+
+    if any("time" in cell_dict and len(np.asarray(cell_dict["time"], dtype=float)) == len(soh) for _, cell_dict, soh, _, _ in valid_rows):
+        ax_thr.legend(handles=step_marker_handles, loc="lower left", fontsize=8)
+    else:
+        ax_thr.text(
+            0.5,
+            0.5,
+            "No throughput axis available",
+            transform=ax_thr.transAxes,
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="dimgray",
+        )
+
+    fig.suptitle(
+        f"SOH data used for prediction ({model_tag}, target SOH={SOH_STEP_TARGET})",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.show()
+    plt.close(fig)
+
+
+def plot_soh_input_sequence_overlay(
+    test_cell_name,
+    interp_data_local,
+    training_cell_names,
+    input_steps,
+    model_tag="interp",
+    pred_step_to_target=None,
+    true_step_to_target=None,
+    throughput_input_stop=None,
+):
+    """
+    Show the full SOH trajectory used by the model and mark where the input window stops:
+      - test cell in blue
+      - all training cells in thin orange
+    """
+    test_cell = interp_data_local.get(test_cell_name)
+    if test_cell is None or "SOH" not in test_cell:
+        return
+
+    test_soh = np.asarray(test_cell["SOH"], dtype=float)
+    if len(test_soh) < int(input_steps) or not np.all(np.isfinite(test_soh)):
+        return
+
+    test_step = np.arange(len(test_soh), dtype=float)
+    has_throughput = "time" in test_cell and len(np.asarray(test_cell["time"], dtype=float)) == len(test_soh)
+    fig, ax_idx = plt.subplots(figsize=(8.8, 5.2))
+
+    n_train_plotted = 0
+    for cn in training_cell_names:
+        cdict = interp_data_local.get(cn)
+        if cdict is None or "SOH" not in cdict:
+            continue
+        y = np.asarray(cdict["SOH"], dtype=float)
+        if len(y) < int(input_steps) or not np.all(np.isfinite(y)):
+            continue
+
+        x_train = np.arange(len(y), dtype=float)
+        ax_idx.plot(x_train, y, color="orange", linewidth=0.8, alpha=0.20, zorder=1)
+        n_train_plotted += 1
+
+    ax_idx.plot(
+        test_step,
+        test_soh,
+        color="steelblue",
+        linewidth=2.2,
+        alpha=0.95,
+        zorder=3,
+        label=f"test trajectory ({test_cell_name})",
+    )
+    stop_idx = float(int(input_steps) - 1)
+    ax_idx.axvline(stop_idx, color="red", linestyle="--", linewidth=1.2, label="input stop")
+    if pred_step_to_target is not None and np.isfinite(pred_step_to_target):
+        ax_idx.scatter(
+            [float(pred_step_to_target)],
+            [float(SOH_STEP_TARGET)],
+            color="red",
+            marker="x",
+            s=80,
+            linewidths=2.0,
+            zorder=6,
+            label="pred EOL",
+        )
+    if true_step_to_target is not None and np.isfinite(true_step_to_target):
+        ax_idx.scatter(
+            [float(true_step_to_target)],
+            [float(SOH_STEP_TARGET)],
+            color="black",
+            marker="o",
+            s=28,
+            zorder=6,
+            label="true EOL",
+        )
+    ax_idx.set_xlabel("Step index")
+    ax_idx.set_ylabel("SOH")
+    ax_idx.set_title(f"SOH trajectory ({model_tag}) - index + throughput")
+    ax_idx.grid(True, alpha=0.3)
+    ax_idx.set_ylim(SOH_PLOT_YMIN, SOH_PLOT_YMAX)
+    ax_idx.legend(loc="best", fontsize=8)
+    ax_idx.text(
+        0.02,
+        0.05,
+        f"training overlays: {n_train_plotted}",
+        transform=ax_idx.transAxes,
+        fontsize=8,
+        color="dimgray",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"),
+    )
+
+    if has_throughput:
+        full_thr = np.asarray(test_cell["time"], dtype=float)
+        full_step = test_step
+
+        if len(full_thr) >= 2 and np.all(np.isfinite(full_thr)) and np.all(np.diff(full_thr) >= 0):
+            def _idx_to_thr(x):
+                return np.interp(np.asarray(x, dtype=float), full_step, full_thr)
+
+            def _thr_to_idx(t):
+                return np.interp(np.asarray(t, dtype=float), full_thr, full_step)
+
+            secax = ax_idx.secondary_xaxis("top", functions=(_idx_to_thr, _thr_to_idx))
+            secax.set_xlabel("Throughput [Ah]")
+
+        if throughput_input_stop is not None and np.isfinite(throughput_input_stop):
+            idx_stop_thr = _interp_or_extrap_1d_at_x(full_thr, full_step, float(throughput_input_stop))
+            if idx_stop_thr is not None and np.isfinite(idx_stop_thr):
+                ax_idx.axvline(
+                    float(idx_stop_thr),
+                    color="red",
+                    linestyle=":",
+                    linewidth=1.2,
+                    label=f"input stop @{float(throughput_input_stop):.1f}Ah",
+                )
+
+        if pred_step_to_target is not None and np.isfinite(pred_step_to_target):
+            pred_thr = _interp_or_extrap_1d_at_x(full_step, full_thr, float(pred_step_to_target))
+            if pred_thr is not None and np.isfinite(pred_thr):
+                ax_idx.annotate(
+                    f"pred EOL thr={float(pred_thr):.1f}Ah",
+                    xy=(float(pred_step_to_target), float(SOH_STEP_TARGET)),
+                    xytext=(8, 18),
+                    textcoords="offset points",
+                    fontsize=8,
+                    color="red",
+                )
+
+        if true_step_to_target is not None and np.isfinite(true_step_to_target):
+            true_thr = _interp_or_extrap_1d_at_x(full_step, full_thr, float(true_step_to_target))
+            if true_thr is not None and np.isfinite(true_thr):
+                ax_idx.annotate(
+                    f"true EOL thr={float(true_thr):.1f}Ah",
+                    xy=(float(true_step_to_target), float(SOH_STEP_TARGET)),
+                    xytext=(8, -20),
+                    textcoords="offset points",
+                    fontsize=8,
+                    color="black",
+                )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.show()
+    plt.close(fig)
+
+
+def plot_soh_input_sequences_all_cells(
+    interp_data_local,
+    ref_cell_names,
+    cycle_cell_names,
+    input_steps,
+    model_tag="interp",
+    throughput_input_stop_ah=None,
+):
+    """
+    Plot full SOH trajectories for all reference + cycle cells while marking the input stop:
+      - index-axis plot
+      - throughput-axis plot
+    """
+    ref_list = [cn for cn in ref_cell_names if cn in interp_data_local]
+    cyc_list = [cn for cn in cycle_cell_names if cn in interp_data_local]
+    n_steps = int(input_steps)
+
+    # -------- index plot --------
+    fig_i, ax_i = plt.subplots(figsize=(8.5, 5.0))
+    cyc_count_i = 0
+    ref_count_i = 0
+
+    for cn in cyc_list:
+        y = np.asarray(interp_data_local[cn].get("SOH", []), dtype=float)
+        if len(y) < n_steps or not np.all(np.isfinite(y)):
+            continue
+        ax_i.plot(np.arange(len(y), dtype=float), y, color="orange", linewidth=0.8, alpha=0.20, zorder=1)
+        cyc_count_i += 1
+
+    for cn in ref_list:
+        y = np.asarray(interp_data_local[cn].get("SOH", []), dtype=float)
+        if len(y) < n_steps or not np.all(np.isfinite(y)):
+            continue
+        ax_i.plot(np.arange(len(y), dtype=float), y, color="steelblue", linewidth=1.6, alpha=0.90, zorder=3)
+        ref_count_i += 1
+
+    ax_i.axvline(float(n_steps - 1), color="red", linestyle="--", linewidth=1.2, label="input stop")
+    ax_i.set_xlabel("Step index")
+    ax_i.set_ylabel("SOH")
+    ax_i.set_title(f"SOH trajectories ({model_tag}) - index axis")
+    ax_i.set_ylim(SOH_PLOT_YMIN, SOH_PLOT_YMAX)
+    ax_i.grid(True, alpha=0.3)
+    ax_i.text(
+        0.02,
+        0.04,
+        f"refs: {ref_count_i} | cycles: {cyc_count_i}",
+        transform=ax_i.transAxes,
+        fontsize=8,
+        color="dimgray",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor="none"),
+    )
+    ax_i.legend(loc="best", fontsize=8)
+    fig_i.tight_layout()
+    plt.show()
+    plt.close(fig_i)
+
+    # -------- throughput plot --------
+    fig_t, ax_t = plt.subplots(figsize=(8.8, 5.0))
+    cyc_count_t = 0
+    ref_count_t = 0
+
+    for cn in cyc_list:
+        cell = interp_data_local[cn]
+        y = np.asarray(cell.get("SOH", []), dtype=float)
+        t = np.asarray(cell.get("time", []), dtype=float)
+        n = min(len(y), len(t))
+        if n < n_steps:
+            continue
+        y = y[:n]
+        t = t[:n]
+        if not (np.all(np.isfinite(y)) and np.all(np.isfinite(t))):
+            continue
+        ax_t.plot(t, y, color="orange", linewidth=0.8, alpha=0.20, zorder=1)
+        cyc_count_t += 1
+
+    for cn in ref_list:
+        cell = interp_data_local[cn]
+        y = np.asarray(cell.get("SOH", []), dtype=float)
+        t = np.asarray(cell.get("time", []), dtype=float)
+        n = min(len(y), len(t))
+        if n < n_steps:
+            continue
+        y = y[:n]
+        t = t[:n]
+        if not (np.all(np.isfinite(y)) and np.all(np.isfinite(t))):
+            continue
+        ax_t.plot(t, y, color="steelblue", linewidth=1.6, alpha=0.90, zorder=3)
+        ref_count_t += 1
+
+    if throughput_input_stop_ah is not None and np.isfinite(throughput_input_stop_ah):
+        thr_stop = float(throughput_input_stop_ah)
+        ax_t.axvline(thr_stop, color="red", linestyle="--", linewidth=1.2, label=f"input stop @{thr_stop:.0f}Ah")
+    ax_t.set_xlabel("Throughput [Ah]")
+    ax_t.set_ylabel("SOH")
+    ax_t.set_title(f"SOH trajectories ({model_tag}) - throughput axis")
+    ax_t.set_ylim(SOH_PLOT_YMIN, SOH_PLOT_YMAX)
+    ax_t.grid(True, alpha=0.3)
+    ax_t.text(
+        0.02,
+        0.04,
+        f"refs: {ref_count_t} | cycles: {cyc_count_t}",
+        transform=ax_t.transAxes,
+        fontsize=8,
+        color="dimgray",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor="none"),
+    )
+    ax_t.legend(loc="best", fontsize=8)
+    fig_t.tight_layout()
+    plt.show()
+    plt.close(fig_t)
+
+
+def plot_all_cells_with_eol_points(
+    interp_data_local,
+    ref_cell_names,
+    cycle_cell_names,
+    soh_target,
+    model_tag="interp",
+    throughput_input_stop_ah=None,
+):
+    """
+    Single combined throughput plot:
+      - all cycle and reference SOH trajectories
+      - EOL points (throughput at SOH target) for both groups
+    """
+    ref_list = [cn for cn in ref_cell_names if cn in interp_data_local]
+    cyc_list = [cn for cn in cycle_cell_names if cn in interp_data_local]
+
+    fig, ax = plt.subplots(figsize=(10.0, 5.6))
+    ref_traj = 0
+    cyc_traj = 0
+    ref_eol = 0
+    cyc_eol = 0
+
+    for cn in cyc_list:
+        cell = interp_data_local[cn]
+        y = np.asarray(cell.get("SOH", []), dtype=float)
+        t = np.asarray(cell.get("time", []), dtype=float)
+        n = min(len(y), len(t))
+        if n < 2:
+            continue
+        y = y[:n]
+        t = t[:n]
+        if not (np.all(np.isfinite(y)) and np.all(np.isfinite(t))):
+            continue
+        ax.plot(t, y, color="orange", linewidth=0.8, alpha=0.20, zorder=1)
+        cyc_traj += 1
+
+        eol_thr = interp_value_with_optional_extrapolation(
+            x=y[::-1],
+            y=t[::-1],
+            x_target=float(soh_target),
+            method=INTERP_METHOD,
+            allow_extrapolation=False,
+        )
+        if eol_thr is not None and np.isfinite(eol_thr):
+            ax.scatter([float(eol_thr)], [float(soh_target)], color="orange", s=14, alpha=0.45, zorder=3)
+            cyc_eol += 1
+
+    for cn in ref_list:
+        cell = interp_data_local[cn]
+        y = np.asarray(cell.get("SOH", []), dtype=float)
+        t = np.asarray(cell.get("time", []), dtype=float)
+        n = min(len(y), len(t))
+        if n < 2:
+            continue
+        y = y[:n]
+        t = t[:n]
+        if not (np.all(np.isfinite(y)) and np.all(np.isfinite(t))):
+            continue
+        ax.plot(t, y, color="steelblue", linewidth=1.7, alpha=0.95, zorder=4)
+        ref_traj += 1
+
+        eol_thr = interp_value_with_optional_extrapolation(
+            x=y[::-1],
+            y=t[::-1],
+            x_target=float(soh_target),
+            method=INTERP_METHOD,
+            allow_extrapolation=False,
+        )
+        if eol_thr is not None and np.isfinite(eol_thr):
+            ax.scatter(
+                [float(eol_thr)],
+                [float(soh_target)],
+                color="red",
+                marker="x",
+                s=58,
+                linewidths=1.8,
+                zorder=6,
+            )
+            ref_eol += 1
+
+    if throughput_input_stop_ah is not None and np.isfinite(throughput_input_stop_ah):
+        thr_stop = float(throughput_input_stop_ah)
+        ax.axvline(thr_stop, color="red", linestyle="--", linewidth=1.2, zorder=5, label=f"input stop @{thr_stop:.0f}Ah")
+
+    ax.axhline(float(soh_target), color="dimgray", linestyle=":", linewidth=1.0, alpha=0.8, zorder=2)
+    ax.set_xlabel("Throughput [Ah]")
+    ax.set_ylabel("SOH")
+    ax.set_title(f"All refs + cycles with EOL points ({model_tag})")
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0.75, 1.03)
+    ax.text(
+        0.02,
+        0.04,
+        f"ref traj={ref_traj}, cyc traj={cyc_traj}, ref EOL={ref_eol}, cyc EOL={cyc_eol}",
+        transform=ax.transAxes,
+        fontsize=8,
+        color="dimgray",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor="none"),
+    )
+    legend_handles = [
+        Line2D([0], [0], color="steelblue", lw=1.8, label="reference trajectories"),
+        Line2D([0], [0], color="orange", lw=1.0, alpha=0.7, label="cycle trajectories"),
+        Line2D([0], [0], marker="x", color="red", lw=0, markersize=7, markeredgewidth=1.6, label="reference EOL points"),
+        Line2D([0], [0], marker="o", color="orange", lw=0, markersize=5, alpha=0.7, label="cycle EOL points"),
+    ]
+    if throughput_input_stop_ah is not None and np.isfinite(throughput_input_stop_ah):
+        legend_handles.append(Line2D([0], [0], color="red", lw=1.2, linestyle="--", label=f"input stop @{float(throughput_input_stop_ah):.0f}Ah"))
+    ax.legend(handles=legend_handles, loc="best", fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+def plot_prediction_summary(
+    test_names,
+    y_true,
+    y_pred_mean,
+    y_pred_ensemble,
+    ylabel,
+    title_prefix,
+    file_stem,
+    method_tag,
+    rmse_value,
+    mape_value,
+):
+    if len(test_names) == 0:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    ax1 = axes[0]
+    x_pos = np.arange(len(test_names))
+    width = 0.35
+    ax1.bar(x_pos - width / 2, y_true, width, label="True", color="steelblue", alpha=0.8)
+    ax1.bar(x_pos + width / 2, y_pred_mean, width, label="Predicted", color="coral", alpha=0.8)
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels([n.replace("SPEED_LW_", "") for n in test_names], rotation=15)
+    ax1.set_ylabel(ylabel)
+    ax1.set_title(f"{title_prefix} ({method_tag}, RMSE={rmse_value:.1f}, MAPE={mape_value:.1f}%)")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = axes[1]
+    for j, _name in enumerate(test_names):
+        ax2.scatter(np.full(len(y_pred_ensemble), j), y_pred_ensemble[:, j], alpha=0.4, s=20, color="coral")
+        ax2.scatter(j, y_true[j], marker="*", s=200, color="steelblue", zorder=5)
+    ax2.set_xticks(range(len(test_names)))
+    ax2.set_xticklabels([n.replace("SPEED_LW_", "") for n in test_names], rotation=15)
+    ax2.set_ylabel(ylabel)
+    ax2.set_title(f"Ensemble predictions ({method_tag}) vs true")
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_fig_dir / f"{file_stem}_{method_tag}.png", dpi=150)
+    plt.show()
+    plt.close(fig)
+
+
+def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method=None, throughput_max=None):
     """
     Interpolate all feature columns on a new reference grid.
     """
+    method_eff = resolve_interp_method(method)
     df = df.copy()
     df.iloc[0] = df.iloc[0].fillna(0)
     df["SOH"] = df["cap_ocv_dis"] / df["cap_ocv_dis"].iloc[0]
@@ -303,31 +1135,21 @@ def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="line
     reference = df[ref_name].to_numpy(dtype=float)
     target_data = df["SOH"].to_numpy(dtype=float)
 
-    reference, target_data = clean_xy_for_interp(reference, target_data)
-    if reference is None or target_data is None:
+    ref_s = pd.Series(reference)
+    keep = ~ref_s.duplicated(keep="first")
+    df = df.loc[keep.values].reset_index(drop=True)
+
+    reference = df[ref_name].to_numpy(dtype=float)
+    target_data = df["SOH"].to_numpy(dtype=float)
+
+    if len(reference) < 2:
+        return None
+    if method_eff == "cubic" and len(reference) < 3:
         return None
 
-    # SOH typically decreases, so reverse for interpolation over SOH -> reference
-    ref_for_soh = reference[::-1]
-    soh_for_ref = target_data[::-1]
+    interpolated_ref = np.interp(target_soh, target_data[::-1], reference[::-1])
 
-    if len(ref_for_soh) < 2:
-        return None
-    if method == "cubic" and len(ref_for_soh) < 3:
-        method_local = "linear"
-    else:
-        method_local = method
-
-    interpolated_ref = interp_value_at_target(
-        x=soh_for_ref,
-        y=ref_for_soh,
-        x_target=target_soh,
-        method=method_local
-    )
-    if interpolated_ref is None:
-        return None
-
-    new_ref_points_cut = np.linspace(0.0, float(interpolated_ref), 15)
+    new_ref_points_cut = np.linspace(0.0, float(interpolated_ref), 5)
     spacing = float(np.mean(np.diff(new_ref_points_cut))) if len(new_ref_points_cut) > 1 else 0.0
     if spacing <= 0:
         return None
@@ -349,10 +1171,24 @@ def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="line
 
     for col in feature_cols:
         yj = df[col].to_numpy(dtype=float)
-        y_new = interp_1d(reference, yj, new_ref_points, method=method_local)
-        if y_new is None:
-            return None
-        out[col] = y_new
+        if np.isnan(yj).any():
+            out[col] = np.interp(new_ref_points, reference, yj)
+            continue
+
+        if method_eff == "linear":
+            out[col] = np.interp(new_ref_points, reference, yj)
+            continue
+
+        try:
+            cs = CubicSpline(reference, yj, bc_type="natural", extrapolate=False)
+            y_new = cs(new_ref_points)
+            nan_mask = ~np.isfinite(y_new)
+            if np.any(nan_mask):
+                y_new_lin = np.interp(new_ref_points, reference, yj)
+                y_new[nan_mask] = y_new_lin[nan_mask]
+            out[col] = y_new
+        except Exception:
+            out[col] = np.interp(new_ref_points, reference, yj)
 
     out[ref_name] = new_ref_points
     if "SOH" in out.columns:
@@ -361,7 +1197,7 @@ def load_and_interpolate(df, target_soh, interpolation_typ="weeks", method="line
     return out
 
 
-def features_at_soh(feat_dict, target_soh=0.995, method="linear", feature_names=None):
+def features_at_soh(feat_dict, target_soh=0.995, method=None, feature_names=None):
     """
     Use capacity from feat_dict to get SOH per row,
     then interpolate each feature list to target_soh.
@@ -451,13 +1287,13 @@ class TinyTemporalCNN(nn.Module):
     def __init__(self, input_dims, timesteps, dropout_rate=0.5):
         super().__init__()
         self.conv1 = nn.Conv1d(input_dims, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(16, 8, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(16, 16, kernel_size=3, padding=1)
         self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc1 = nn.Linear(8, 8)
+        self.fc1 = nn.Linear(16, 8)
         self.fc2 = nn.Linear(8, 1)
         self.dropout = nn.Dropout(dropout_rate)
         self.bn1 = nn.BatchNorm1d(16)
-        self.bn2 = nn.BatchNorm1d(8)
+        self.bn2 = nn.BatchNorm1d(16)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)
@@ -476,6 +1312,7 @@ class TinyTemporalCNN(nn.Module):
 # =============================================================================
 results = {}
 results_ref = {}
+results_loaded_ref = {}
 
 for csv_file in sorted(interp_dir.glob("*.csv")):
     if csv_file.name.startswith("_"):
@@ -483,10 +1320,11 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
 
     cell_name = csv_file.stem
 
-    # only process refs and cycle cells
+    # only process loaded refs and cycle cells
     is_ref = cell_name in REF_NAMES
+    is_loaded_ref = cell_name in LOADED_REF_NAMES
     is_cycle = "cycle" in cell_name.lower()
-    if not is_ref and not is_cycle:
+    if not is_loaded_ref and not is_cycle:
         continue
 
     df = pd.read_csv(csv_file)
@@ -616,10 +1454,18 @@ for csv_file in sorted(interp_dir.glob("*.csv")):
 
     if is_ref:
         results_ref[cell_name] = feat_dict
+    elif is_loaded_ref:
+        results_loaded_ref[cell_name] = feat_dict
     else:
         results[cell_name] = feat_dict
 
-    print(f"{'[REF] ' if is_ref else '[TRAIN]'} {cell_name}: done")
+    if is_ref:
+        cell_tag = "[REF] "
+    elif is_loaded_ref:
+        cell_tag = "[TEST_REF]"
+    else:
+        cell_tag = "[TRAIN]"
+    print(f"{cell_tag} {cell_name}: done")
 
 
 # =============================================================================
@@ -707,6 +1553,7 @@ farthest_set = set(farthest_cellnames)
 ref_set = set(REF_NAMES)
 
 all_results = {**results_ref, **results}
+all_results.update(results_loaded_ref)
 interp_data = {}
 
 for cell_name, fd in all_results.items():
@@ -859,17 +1706,19 @@ print(f"\nInterpolated {len(interp_data)} cells with features: {INTERP_FEATURES}
 
 
 # =============================================================================
-# STEP 4: FIND INTERPOLATED STEP TO TARGET SOH
+# STEP 4: FIND INTERPOLATED STEP / THROUGHPUT TO TARGET SOH
 # =============================================================================
 for cell_name, cell_dict in interp_data.items():
     soh = np.asarray(cell_dict["SOH"], dtype=float)
 
     if len(soh) < 2 or not np.all(np.isfinite(soh)):
         cell_dict["step_to_target"] = None
+        cell_dict["throughput_to_target"] = None
         continue
 
     # step axis on interpolated grid
     step_axis = np.arange(len(soh), dtype=float)
+    thru_axis = np.asarray(cell_dict.get("time", []), dtype=float)
 
     # interpolate/extrapolate fractional step where SOH reaches target
     step_to_target = interp_value_with_optional_extrapolation(
@@ -881,6 +1730,17 @@ for cell_name, cell_dict in interp_data.items():
     )
 
     cell_dict["step_to_target"] = step_to_target
+    if len(thru_axis) == len(soh):
+        throughput_to_target = interp_value_with_optional_extrapolation(
+            x=soh[::-1],
+            y=thru_axis[::-1],
+            x_target=SOH_STEP_TARGET,
+            method=INTERP_METHOD,
+            allow_extrapolation=EXTRAPOLATE_SOH_TARGET_IF_NOT_REACHED,
+        )
+    else:
+        throughput_to_target = None
+    cell_dict["throughput_to_target"] = throughput_to_target
 
 
 # =============================================================================
@@ -1003,7 +1863,7 @@ else:
 # =============================================================================
 # STEP 5B: LOG-LOG RELATIONSHIPS (FEATURES vs STEPS TO TARGET SOH)
 # =============================================================================
-exclude_keys = {"time", "SOH", "capacity", "step_to_target"}
+exclude_keys = {"time", "SOH", "capacity", "step_to_target", "throughput_to_target"}
 candidate_loglog_features = set()
 for _, cell_dict in interp_data.items():
     for key, val in cell_dict.items():
@@ -1479,7 +2339,7 @@ else:
                 x=t_arr,
                 y=f_arr,
                 x_target=THROUGHPUT_FEATURE_LOGLOG,
-                method="linear",
+                method=INTERP_METHOD,
             )
             if f_at_thr is None or (not np.isfinite(f_at_thr)) or f_at_thr == 0.0:
                 continue
@@ -2086,7 +2946,7 @@ else:
                     print(temp_rows[EXP_CONDS].to_string(index=False))
 
 # =============================================================================
-# STEP 7: MAKE DATASET FOR MODEL (CNN)
+# STEP 7: MAKE DATASET FOR INTERPOLATED-INPUT CNN (STEP TARGET)
 # =============================================================================
 print("Loading data from interp_data dictionary ...")
 
@@ -2132,19 +2992,41 @@ for cell_name, cell_dict in interp_data.items():
     else:
         print(f"  [SKIP]  {cell_name} (not cycle, not ref)")
 
+test_order = [idx for idx, name in sorted(enumerate(test_names_found), key=lambda item: TEST_NAMES.index(item[1]))]
+if len(test_order) != len(test_names_found):
+    raise RuntimeError("Failed to order interpolated test references.")
+test_X_list = [test_X_list[idx] for idx in test_order]
+test_y_list = [test_y_list[idx] for idx in test_order]
+test_names_found = [test_names_found[idx] for idx in test_order]
+missing_interp_refs = [name for name in TEST_NAMES if name not in test_names_found]
+if missing_interp_refs:
+    print(f"[WARN] Missing interpolated test references: {missing_interp_refs}")
+
 X_train_all = np.stack(train_X_list, axis=0)
-y_train_all = np.array(train_y_list)
+y_train_all = np.array(train_y_list, dtype=float)
 X_test = np.stack(test_X_list, axis=0)
-y_test = np.array(test_y_list)
+y_test = np.array(test_y_list, dtype=float)
+
+(scaled_interp_arrays, interp_input_scaler) = scale_temporal_features_except(
+    X_train_all,
+    [X_test],
+    feature_names=FEATURE_COLS,
+    exclude_features=("SOH", "capacity"),
+)
+X_train_all, X_test = scaled_interp_arrays
+scaled_interp_feature_names = [f for f in FEATURE_COLS if f not in ("SOH", "capacity")]
 
 print(f"\nTrain: {X_train_all.shape[0]} cells,  Test: {X_test.shape[0]} cells")
 print(f"Features: {FEATURE_COLS}")
 print(f"Input shape per cell: ({INPUT_STEPS}, {INPUT_FEATURES})")
+print(f"Standardized interpolated input features: {scaled_interp_feature_names}")
+print(f"Target: step_to_target, transformed with {TARGET_TRANSFORM_LABEL}")
 
 
-# log-transform target
-y_train_all = np.log(y_train_all / 20.0)
-y_test = np.log(y_test / 20.0)
+# log-scale target
+interp_target_transform = fit_log_target_transform(y_train_all)
+y_train_all = transform_log_target(y_train_all, interp_target_transform)
+y_test = transform_log_target(y_test, interp_target_transform)
 
 
 # =============================================================================
@@ -2257,21 +3139,46 @@ for i in random_numbers:
 y_pred_mean = np.mean(y_pred_list, axis=0)
 
 print("\n" + "=" * 70)
-print(f"RESULTS (step scale) — interpolation={INTERP_METHOD}")
+print(f"RESULTS (transformed step target: {TARGET_TRANSFORM_LABEL}) - interpolation={INTERP_METHOD}")
 print("=" * 70)
 for name, true, pred in zip(test_names_found, y_test, y_pred_mean):
     print(f"  {name:30s}  true={true:.4f}  pred={pred:.4f}")
 
-print(f"\n  MAPE (log):  {np.mean(np.abs((y_test - y_pred_mean) / y_test)) * 100:.2f}%")
+print(f"\n  RMSE (transformed): {np.sqrt(np.mean((y_test - y_pred_mean) ** 2)):.4f}")
 
 # Back to original scale
-y_test_steps = np.exp(y_test) * 20.0
-y_pred_steps = np.exp(y_pred_mean) * 20.0
+y_test_steps = inverse_log_target(y_test, interp_target_transform)
+y_pred_steps = inverse_log_target(y_pred_mean, interp_target_transform)
 
 print("\nRESULTS (original step scale)")
 print("=" * 70)
 for name, true, pred in zip(test_names_found, y_test_steps, y_pred_steps):
     print(f"  {name:30s}  true={true:.1f}  pred={pred:.1f}")
+
+plot_prediction_soh_context_group(
+    cell_names=test_names_found,
+    interp_data_local=interp_data,
+    pred_step_to_target=y_pred_steps,
+    true_step_to_target=y_test_steps,
+    model_tag=f"cnn_interp_{INTERP_METHOD}",
+)
+
+plot_soh_input_sequences_all_cells(
+    interp_data_local=interp_data,
+    ref_cell_names=REF_NAMES,
+    cycle_cell_names=train_names,
+    input_steps=INPUT_STEPS,
+    model_tag=f"cnn_interp_{INTERP_METHOD}",
+    throughput_input_stop_ah=THROUGHPUT_CNN_INPUT_TARGET_AH,
+)
+plot_all_cells_with_eol_points(
+    interp_data_local=interp_data,
+    ref_cell_names=REF_NAMES,
+    cycle_cell_names=train_names,
+    soh_target=SOH_STEP_TARGET,
+    model_tag=f"cnn_interp_{INTERP_METHOD}",
+    throughput_input_stop_ah=THROUGHPUT_CNN_INPUT_TARGET_AH,
+)
 
 rmse = np.sqrt(np.mean((y_test_steps - y_pred_steps) ** 2))
 mape = np.mean(np.abs((y_test_steps - y_pred_steps) / y_test_steps)) * 100
@@ -2279,34 +3186,237 @@ print(f"\n  RMSE (steps): {rmse:.2f}")
 print(f"  MAPE (steps): {mape:.2f}%")
 
 
+preds_steps = inverse_log_target(np.array(y_pred_list), interp_target_transform)
+plot_prediction_summary(
+    test_names=test_names_found,
+    y_true=y_test_steps,
+    y_pred_mean=y_pred_steps,
+    y_pred_ensemble=preds_steps,
+    ylabel="Steps to SOH target",
+    title_prefix="True vs Predicted steps",
+    file_stem="prediction_results_steps",
+    method_tag=INTERP_METHOD,
+    rmse_value=rmse,
+    mape_value=mape,
+)
+
+rmse_interp = float(rmse)
+mape_interp = float(mape)
+
+
 # =============================================================================
-# STEP 11: FINAL PLOTS
+# STEP 12: SECOND TEMPORAL CNN ON RAW (PRE-INTERPOLATION) THROUGHPUT INPUT
 # =============================================================================
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+print("\n" + "=" * 70)
+print("RAW THROUGHPUT TEMPORAL CNN (pre-interpolation features -> throughput target)")
+print("=" * 70)
+print(f"Raw temporal CNN input throughput target: {THROUGHPUT_CNN_INPUT_TARGET_AH:.1f} Ah")
 
-ax1 = axes[0]
-x_pos = np.arange(len(test_names_found))
-width = 0.35
-ax1.bar(x_pos - width / 2, y_test_steps, width, label="True", color="steelblue", alpha=0.8)
-ax1.bar(x_pos + width / 2, y_pred_steps, width, label="Predicted", color="coral", alpha=0.8)
-ax1.set_xticks(x_pos)
-ax1.set_xticklabels([n.replace("SPEED_LW_", "") for n in test_names_found], rotation=15)
-ax1.set_ylabel("Steps to SOH target")
-ax1.set_title(f"True vs Predicted steps ({INTERP_METHOD}, RMSE={rmse:.1f}, MAPE={mape:.1f}%)")
-ax1.legend()
-ax1.grid(True, alpha=0.3)
+raw_train_X_list, raw_train_y_list, raw_train_names = [], [], []
+raw_test_X_list, raw_test_y_list, raw_test_names = [], [], []
 
-ax2 = axes[1]
-preds_steps = np.exp(np.array(y_pred_list)) * 20.0
-for j, name in enumerate(test_names_found):
-    ax2.scatter(np.full(N_SEEDS, j), preds_steps[:, j], alpha=0.4, s=20, color="coral")
-    ax2.scatter(j, y_test_steps[j], marker="*", s=200, color="steelblue", zorder=5)
-ax2.set_xticks(range(len(test_names_found)))
-ax2.set_xticklabels([n.replace("SPEED_LW_", "") for n in test_names_found], rotation=15)
-ax2.set_ylabel("Steps to SOH target")
-ax2.set_title(f"Ensemble predictions ({INTERP_METHOD}) vs true")
-ax2.grid(True, alpha=0.3)
+for cell_name, raw_fd in all_results.items():
+    throughput_target = interp_data.get(cell_name, {}).get("throughput_to_target")
+    if throughput_target is None or not np.isfinite(throughput_target) or throughput_target <= 0:
+        continue
 
-fig.tight_layout()
-fig.savefig(out_fig_dir / f"prediction_results_{INTERP_METHOD}.png", dpi=150)
-plt.show()
+    X_raw_seq = build_raw_throughput_sequence(
+        feat_dict=raw_fd,
+        feature_cols=FEATURE_COLS,
+        n_steps=INPUT_STEPS,
+        throughput_target=THROUGHPUT_CNN_INPUT_TARGET_AH,
+    )
+    if X_raw_seq is None:
+        continue
+
+    if cell_name in TEST_NAMES:
+        raw_test_X_list.append(X_raw_seq)
+        raw_test_y_list.append(float(throughput_target))
+        raw_test_names.append(cell_name)
+    elif "cycle" in cell_name.lower():
+        raw_train_X_list.append(X_raw_seq)
+        raw_train_y_list.append(float(throughput_target))
+        raw_train_names.append(cell_name)
+
+raw_test_order = [idx for idx, name in sorted(enumerate(raw_test_names), key=lambda item: TEST_NAMES.index(item[1]))]
+if len(raw_test_order) != len(raw_test_names):
+    raise RuntimeError("Failed to order raw test references.")
+raw_test_X_list = [raw_test_X_list[idx] for idx in raw_test_order]
+raw_test_y_list = [raw_test_y_list[idx] for idx in raw_test_order]
+raw_test_names = [raw_test_names[idx] for idx in raw_test_order]
+missing_raw_refs = [name for name in TEST_NAMES if name not in raw_test_names]
+if missing_raw_refs:
+    print(f"[WARN] Missing raw test references: {missing_raw_refs}")
+
+if len(raw_train_X_list) == 0 or len(raw_test_X_list) == 0:
+    print("[WARN] Not enough raw throughput data for second CNN; skipping comparison.")
+else:
+    X_train_raw_all = np.stack(raw_train_X_list, axis=0)
+    y_train_raw_all = np.array(raw_train_y_list, dtype=float)
+    X_test_raw = np.stack(raw_test_X_list, axis=0)
+    y_test_raw = np.array(raw_test_y_list, dtype=float)
+
+    (scaled_raw_arrays, raw_input_scaler) = scale_temporal_features_except(
+        X_train_raw_all,
+        [X_test_raw],
+        feature_names=FEATURE_COLS,
+        exclude_features=("SOH", "capacity"),
+    )
+    X_train_raw_all, X_test_raw = scaled_raw_arrays
+    scaled_raw_feature_names = [f for f in FEATURE_COLS if f not in ("SOH", "capacity")]
+
+    print(f"Raw-throughput CNN dataset: train={len(X_train_raw_all)}, test={len(X_test_raw)}")
+    print(f"Standardized raw input features: {scaled_raw_feature_names}")
+    print(f"Target: throughput_to_target [Ah], transformed with {RAW_TARGET_TRANSFORM_LABEL}")
+
+    raw_target_transform = fit_log_target_transform(y_train_raw_all, divisor=RAW_TARGET_LOG_DIVISOR)
+    y_train_raw_all = transform_log_target(y_train_raw_all, raw_target_transform)
+    y_test_raw = transform_log_target(y_test_raw, raw_target_transform)
+
+    use_val_raw = USE_VALIDATION
+    if use_val_raw and len(X_train_raw_all) > 10:
+        X_train_raw, y_train_raw, X_val_raw, y_val_raw = create_balanced_val_split(
+            X_train_raw_all,
+            y_train_raw_all,
+            val_fraction=VALIDATION_SPLIT,
+            bins=min(3, len(X_train_raw_all) // 3),
+        )
+    else:
+        X_train_raw, y_train_raw = X_train_raw_all, y_train_raw_all
+        X_val_raw, y_val_raw = None, None
+        use_val_raw = False
+
+    X_train_raw_t = torch.from_numpy(X_train_raw).float().to(device)
+    y_train_raw_t = torch.from_numpy(y_train_raw).float().view(-1, 1).to(device)
+    X_test_raw_t = torch.from_numpy(X_test_raw).float().to(device)
+    if use_val_raw:
+        X_val_raw_t = torch.from_numpy(X_val_raw).float().to(device)
+        y_val_raw_t = torch.from_numpy(y_val_raw).float().view(-1, 1).to(device)
+
+    raw_loader = DataLoader(TensorDataset(X_train_raw_t, y_train_raw_t), batch_size=BATCH_SIZE, shuffle=True)
+
+    np.random.seed(42)
+    raw_seed_list = np.random.choice(range(0, 100), size=N_SEEDS, replace=False)
+    y_pred_raw_list = []
+
+    for s in raw_seed_list:
+        print(f"\n[RAW] Seed {s}")
+        if "model_raw" in locals():
+            del model_raw, optimizer_raw
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        set_seed(s)
+        model_raw = TinyTemporalCNN(INPUT_FEATURES, INPUT_STEPS, dropout_rate=DROPOUT).to(device)
+        optimizer_raw = optim.Adam(model_raw.parameters(), lr=LR)
+        scheduler_raw = ReduceLROnPlateau(optimizer_raw, "min", patience=5, factor=0.5)
+
+        best_val_loss_raw = float("inf")
+        no_improve_raw = 0
+        early_stop_raw = False
+        raw_model_path = os.path.join("savemodel", f"best_model_raw_throughput_{INTERP_METHOD}.pth")
+        os.makedirs("savemodel", exist_ok=True)
+
+        for epoch in range(EPOCHS + 1):
+            if early_stop_raw:
+                break
+
+            model_raw.train()
+            for xb, yb in raw_loader:
+                optimizer_raw.zero_grad()
+                outb = model_raw(xb)
+                lossb = mse_loss(yb, outb)
+                lossb.backward()
+                optimizer_raw.step()
+
+            if use_val_raw and (epoch % 10 == 0 or epoch == EPOCHS):
+                model_raw.eval()
+                with torch.no_grad():
+                    val_out_raw = model_raw(X_val_raw_t)
+                    val_loss_raw = mse_loss(y_val_raw_t, val_out_raw)
+                    scheduler_raw.step(val_loss_raw)
+                    if val_loss_raw < best_val_loss_raw:
+                        best_val_loss_raw = val_loss_raw
+                        no_improve_raw = 0
+                        torch.save(model_raw.state_dict(), raw_model_path)
+                    else:
+                        no_improve_raw += 1
+                        if no_improve_raw >= 10:
+                            early_stop_raw = True
+
+        if use_val_raw and os.path.exists(raw_model_path):
+            model_raw.load_state_dict(torch.load(raw_model_path))
+
+        model_raw.eval()
+        with torch.no_grad():
+            y_pred_raw = model_raw(X_test_raw_t).cpu().numpy().reshape(-1)
+        y_pred_raw_list.append(y_pred_raw)
+
+    y_pred_raw_mean = np.mean(y_pred_raw_list, axis=0)
+    y_test_raw_thr = inverse_log_target(y_test_raw, raw_target_transform)
+    y_pred_raw_thr = inverse_log_target(y_pred_raw_mean, raw_target_transform)
+
+    rmse_raw = float(np.sqrt(np.mean((y_test_raw_thr - y_pred_raw_thr) ** 2)))
+    mape_raw = float(np.mean(np.abs((y_test_raw_thr - y_pred_raw_thr) / y_test_raw_thr)) * 100.0)
+
+    print("\nRAW THROUGHPUT CNN RESULTS (original throughput scale)")
+    for n, yt, yp in zip(raw_test_names, y_test_raw_thr, y_pred_raw_thr):
+        print(f"  {n:30s}  true={yt:.1f}  pred={yp:.1f}")
+    raw_pred_steps = []
+    raw_true_steps = []
+    raw_plot_names = []
+    for n, yt, yp in zip(raw_test_names, y_test_raw_thr, y_pred_raw_thr):
+        cell_dict = interp_data.get(n)
+        pred_step = throughput_target_to_step(cell_dict, float(yp))
+        true_step = throughput_target_to_step(cell_dict, float(yt))
+        if pred_step is None or true_step is None:
+            continue
+        raw_plot_names.append(n)
+        raw_pred_steps.append(float(pred_step))
+        raw_true_steps.append(float(true_step))
+
+    plot_prediction_soh_context_group(
+        cell_names=raw_plot_names,
+        interp_data_local=interp_data,
+        pred_step_to_target=np.array(raw_pred_steps, dtype=float),
+        true_step_to_target=np.array(raw_true_steps, dtype=float),
+        model_tag=f"cnn_raw_thr_{INTERP_METHOD}",
+    )
+
+    plot_soh_input_sequences_all_cells(
+        interp_data_local=interp_data,
+        ref_cell_names=REF_NAMES,
+        cycle_cell_names=raw_train_names,
+        input_steps=INPUT_STEPS,
+        model_tag=f"cnn_raw_thr_{INTERP_METHOD}",
+        throughput_input_stop_ah=THROUGHPUT_CNN_INPUT_TARGET_AH,
+    )
+    plot_all_cells_with_eol_points(
+        interp_data_local=interp_data,
+        ref_cell_names=REF_NAMES,
+        cycle_cell_names=raw_train_names,
+        soh_target=SOH_STEP_TARGET,
+        model_tag=f"cnn_raw_thr_{INTERP_METHOD}",
+        throughput_input_stop_ah=THROUGHPUT_CNN_INPUT_TARGET_AH,
+    )
+    preds_raw_thr = inverse_log_target(np.array(y_pred_raw_list), raw_target_transform)
+    plot_prediction_summary(
+        test_names=raw_test_names,
+        y_true=y_test_raw_thr,
+        y_pred_mean=y_pred_raw_thr,
+        y_pred_ensemble=preds_raw_thr,
+        ylabel="Throughput to SOH target [Ah]",
+        title_prefix="True vs Predicted throughput",
+        file_stem="prediction_results_throughput",
+        method_tag=INTERP_METHOD,
+        rmse_value=rmse_raw,
+        mape_value=mape_raw,
+    )
+    print(f"  RMSE (Ah): {rmse_raw:.2f}")
+    print(f"  MAPE (%): {mape_raw:.2f}%")
+
+    print("\n" + "=" * 70)
+    print("CNN SUMMARY")
+    print("=" * 70)
+    print(f"Interpolated-input Temporal CNN  -> predicts steps, RMSE={rmse_interp:.2f} steps, MAPE={mape_interp:.2f}%")
+    print(f"Raw-throughput Temporal CNN      -> predicts throughput, RMSE={rmse_raw:.2f} Ah, MAPE={mape_raw:.2f}%")

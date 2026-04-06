@@ -22,6 +22,32 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
+def extract_initial_checkup_voltage(
+    df: pd.DataFrame,
+    voltage_candidates: tuple[str, ...] = ("voltage_V", "voltage", "Voltage", "U"),
+):
+    """
+    Return the earliest valid voltage value from a checkup/RPT dataframe.
+    Uses abs_time ordering when available.
+    """
+    if df is None or df.empty:
+        return None
+
+    work = df.copy()
+    if "abs_time" in work.columns:
+        work["__abs_time__"] = pd.to_datetime(work["abs_time"], errors="coerce")
+        work = work.sort_values("__abs_time__")
+
+    for col in voltage_candidates:
+        if col not in work.columns:
+            continue
+        vals = pd.to_numeric(work[col], errors="coerce")
+        vals = vals[vals.notna()]
+        if not vals.empty:
+            return float(vals.iloc[0])
+
+    return None
+
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
     configure_from_config(cfg)
@@ -161,6 +187,8 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                     continue
 
             rows = []
+            soh_points = []
+            soh_rows = []
             for df_chk, lbl_chk in checkup_list:
                 try:
                     label_lower = lbl_chk.lower()
@@ -176,7 +204,54 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                         pulse_feature = analyze_df_pulse(df_filtered)
 
                         features = ocv_features | pulse_feature
+                        init_v = extract_initial_checkup_voltage(df_chk)
+                        features["init_voltage_checkup_V"] = float(init_v) if init_v is not None else float("nan")
                         rows.append(features)
+
+                        res = None
+                        source_type = None
+                        if "cu" in label_lower:
+                            if "step_int" in df_chk.columns:
+                                res = compute_checkup_point_step19(
+                                    df_chk,
+                                    min_step_required=int(soh_cfg.get("min_step_required", 20)),
+                                    eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                                    i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                                )
+                                source_type = "CU"
+                        elif include_rpt and "rpt" in label_lower:
+                            if "step_int" in df_chk.columns:
+                                res = compute_checkup_point_step6(
+                                    df_chk,
+                                    min_step_required=rpt_min_step,
+                                    eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                                    i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                                    trailing_step_id=rpt_trailing_step,
+                                    require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                                )
+                                source_type = "RPT"
+
+                        if res is not None and source_type is not None:
+                            x_thru = cumulative_throughput_until(total_list, res.discharge_end_time)
+                            soh_points.append((x_thru, res.capacity_Ah, lbl_chk, res.discharge_end_time, source_type))
+                            if source_type == "RPT":
+                                print(f"[INFO] Added RPT SoH point for cell {cell}, step 6 discharge capacity = {res.capacity_Ah:.4f} Ah")
+                            soh_rows.append({
+                                "cell_id": cell,
+                                "program_name": lbl_chk,
+                                "source_type": source_type,
+                                "step_id": res.step_id,
+                                "discharge_end_time": res.discharge_end_time,
+                                "discharge_start_time": res.discharge_start_time,
+                                "throughput_Ah": x_thru,
+                                "discharge_capacity_Ah": res.capacity_Ah,
+                                "step_start_index": res.index_start,
+                                "step_end_index": res.index_end,
+                                "step_min_voltage_V": res.min_voltage_V,
+                                "step19_start_index": res.index_start if res.step_id == 19 else None,
+                                "step19_end_index": res.index_end if res.step_id == 19 else None,
+                                "step19_min_voltage_V": res.min_voltage_V if res.step_id == 19 else None,
+                            })
                 except Exception as e:
                     logging.exception(f"[{cell}] feature extraction failed for checkup run '{lbl_chk}': {e}")
                     continue
@@ -208,17 +283,60 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             except Exception as e:
                 logging.exception(f"[{cell}] adding experimental_condition columns failed: {e}")
 
+            # SoH capacity-fade export + scatter (optional)
+            try:
+                if soh_points:
+                    df_soh = pd.DataFrame(soh_rows)
+                    soh_dir = cell_dir / "checkup"
+                    if export_soh_data:
+                        soh_data_path = soh_dir / "soh_scatter_data.csv"
+                        df_soh.to_csv(soh_data_path, index=False)
+                        print(f"[OK] wrote SoH data: {soh_data_path}")
+
+                    legacy_df = df_soh.rename(columns={"program_name": "program"})[
+                        ["throughput_Ah", "discharge_capacity_Ah", "program", "discharge_end_time"]
+                    ]
+                    legacy_df.to_csv(soh_dir / "soh_discharge_capacity_vs_throughput.csv", index=False)
+
+                    plt.figure(figsize=(8, 5))
+                    xs = df_soh["throughput_Ah"].to_list()
+                    ys = df_soh["discharge_capacity_Ah"].to_list()
+                    plt.scatter(xs, ys)
+                    for x, y, name in zip(xs, ys, df_soh["program_name"].to_list()):
+                        label = str(name).replace("__PLUS__", " + ")
+                        if len(label) > 60:
+                            label = f"{label[:57]}..."
+                        plt.annotate(label, (x, y), fontsize=8, xytext=(5, 2), textcoords="offset points")
+                    plt.xlabel("Cumulative charge throughput up to discharge [Ah]")
+                    plt.ylabel("Discharge capacity (checkup) [Ah]")
+                    plt.title(f"Cell: {cell} - SoH: Capacity vs Throughput")
+                    plt.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    plt.savefig(cell_dir / "checkup" / "soh_discharge_capacity_vs_throughput.png", dpi=160)
+                    plt.close()
+                else:
+                    print(f"[INFO] {cell}: no valid checkup discharges found for SoH plot.")
+            except Exception as e:
+                logging.exception(f"[{cell}] SoH capacity-fade export/plot failed: {e}")
+
         except Exception as e:
             logging.exception(f"[{cell}] SoH/feature pipeline failed: {e}")
             continue
 
         # --- derived features + plots (non-critical, but keep going if they fail) ---
         try:
+            enable_discharge_ocv = bool(cfg.get("analysis", {}).get("enable_discharge_ocv", False))
             vol_high = volt_lim["high"];
             vol_low = volt_lim["low"]
             vol_mhigh = volt_lim["highm"];
             vol_mlow = volt_lim["lowm"]
             vol_llow = volt_lim["lowl"]
+            volt_lim_dis = cfg.get("voltage_dis", volt_lim)
+            vol_high_dis = volt_lim_dis["high"]
+            vol_low_dis = volt_lim_dis["low"]
+            vol_mhigh_dis = volt_lim_dis["highm"]
+            vol_mlow_dis = volt_lim_dis["lowm"]
+            vol_llow_dis = volt_lim_dis["lowl"]
 
             mean_mid_cha, var_mid_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_mlow,
                                                               x_hi=vol_mhigh)
@@ -242,52 +360,93 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             df_summary["mean_dQ_c"] = mean_dQ_cha;
             df_summary["var_dQ_c"] = var_dQ_cha
 
-            mean_mid_dis, var_mid_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_mlow,
-                                                              x_hi=vol_mhigh)
-            mean_low_dis, var_low_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_low,
-                                                              x_hi=vol_mlow)
-            mean_high_dis, var_high_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis",
-                                                                x_lo=vol_mhigh, x_hi=vol_high)
-            mean_dQ_dis, var_dQ_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="Q_intVdis", x_lo=vol_low,
-                                                            x_hi=vol_high)
+            if enable_discharge_ocv and {"Vdis", "dQdVdis", "Q_intVdis"}.issubset(df_summary.columns):
+                mean_mid_dis, var_mid_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_mlow_dis,
+                                                                  x_hi=vol_mhigh_dis)
+                mean_low_dis, var_low_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_low_dis,
+                                                                  x_hi=vol_mlow_dis)
+                mean_high_dis, var_high_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis",
+                                                                    x_lo=vol_mhigh_dis, x_hi=vol_high_dis)
+                mean_dQ_dis, var_dQ_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="Q_intVdis", x_lo=vol_low_dis,
+                                                                x_hi=vol_high_dis)
 
-            df_summary["mean_d_dqdv_m_d"] = mean_mid_dis;
-            df_summary["var_d_dqdv_m_d"] = var_mid_dis
-            df_summary["mean_d_dqdv_l_d"] = mean_low_dis;
-            df_summary["var_d_dqdv_l_d"] = var_low_dis
-            df_summary["mean_d_dqdv_h_d"] = mean_high_dis;
-            df_summary["var_d_dqdv_h_d"] = var_high_dis
-            df_summary["mean_dQ_d"] = mean_dQ_dis;
-            df_summary["var_dQ_d"] = var_dQ_dis
+                df_summary["mean_d_dqdv_m_d"] = mean_mid_dis;
+                df_summary["var_d_dqdv_m_d"] = var_mid_dis
+                df_summary["mean_d_dqdv_l_d"] = mean_low_dis;
+                df_summary["var_d_dqdv_l_d"] = var_low_dis
+                df_summary["mean_d_dqdv_h_d"] = mean_high_dis;
+                df_summary["var_d_dqdv_h_d"] = var_high_dis
+                df_summary["mean_dQ_d"] = mean_dQ_dis;
+                df_summary["var_dQ_d"] = var_dQ_dis
 
-            mean_mid_t, var_mid_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mlow,
-                                                          x_hi=vol_mhigh)
-            mean_low_t, var_low_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_low,
-                                                          x_hi=vol_mlow)
-            mean_high_t, var_high_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mhigh,
-                                                            x_hi=vol_high)
-            mean_d_Qt, var_d_Qt = window_delta_mean_var(df_summary, x_col="Vdis", y_col="T_intV", x_lo=vol_low,
-                                                        x_hi=vol_high)
+            # Q-OCV window features (charge/discharge) over same voltage windows
+            q_windows = {
+                "lowl": (vol_llow, vol_low),
+                "low": (vol_low, vol_mlow),
+                "mid": (vol_mlow, vol_mhigh),
+                "high": (vol_mhigh, vol_high),
+                "full": (vol_low, vol_high),
+            }
+            qocv_cha_feats = compute_window_feature_set(
+                df_summary,
+                x_col="Vcha",
+                y_col="Q_intVcha",
+                windows=q_windows,
+                prefix="qocv_c",
+            )
+            qocv_dis_feats = {}
+            if enable_discharge_ocv and {"Vdis", "Q_intVdis"}.issubset(df_summary.columns):
+                qocv_dis_feats = compute_window_feature_set(
+                    df_summary,
+                    x_col="Vdis",
+                    y_col="Q_intVdis",
+                    windows={
+                        "lowl": (vol_llow_dis, vol_low_dis),
+                        "low": (vol_low_dis, vol_mlow_dis),
+                        "mid": (vol_mlow_dis, vol_mhigh_dis),
+                        "high": (vol_mhigh_dis, vol_high_dis),
+                        "full": (vol_low_dis, vol_high_dis),
+                    },
+                    prefix="qocv_d",
+                )
+            for k, v in {**qocv_cha_feats, **qocv_dis_feats}.items():
+                df_summary[k] = v
 
-            df_summary["mean_dqdv_mt"] = mean_mid_t;
-            df_summary["var_d_dqdv_mt"] = var_mid_t
-            df_summary["mean_dqdv_lt"] = mean_low_t;
-            df_summary["var_d_dqdv_lt"] = var_low_t
-            df_summary["mean_dqdv_ht"] = mean_high_t;
-            df_summary["var_d_dqdv_ht"] = var_high_t
-            df_summary["mean_d_Qt"] = mean_d_Qt;
-            df_summary["var_d_Qt"] = var_d_Qt
+            if enable_discharge_ocv and {"Vdis", "dTdV", "T_intV"}.issubset(df_summary.columns):
+                mean_mid_t, var_mid_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mlow_dis,
+                                                              x_hi=vol_mhigh_dis)
+                mean_low_t, var_low_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_low_dis,
+                                                              x_hi=vol_mlow_dis)
+                mean_high_t, var_high_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mhigh_dis,
+                                                                x_hi=vol_high_dis)
+                mean_d_Qt, var_d_Qt = window_delta_mean_var(df_summary, x_col="Vdis", y_col="T_intV", x_lo=vol_low_dis,
+                                                            x_hi=vol_high_dis)
+
+                df_summary["mean_dqdv_mt"] = mean_mid_t;
+                df_summary["var_d_dqdv_mt"] = var_mid_t
+                df_summary["mean_dqdv_lt"] = mean_low_t;
+                df_summary["var_d_dqdv_lt"] = var_low_t
+                df_summary["mean_dqdv_ht"] = mean_high_t;
+                df_summary["var_d_dqdv_ht"] = var_high_t
+                df_summary["mean_d_Qt"] = mean_d_Qt;
+                df_summary["var_d_Qt"] = var_d_Qt
 
         except Exception as e:
             logging.exception(f"[{cell}] derived feature calc failed: {e}")
 
         # plots (optional)
         try:
-            plot_curves(df_summary, cfg, cell, x_col="Vcha", y_col="dQdVcha", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="Qcha", y_col="dVdQcha", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="Vdis", y_col="dQdVdis", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="Qdis", y_col="dVdQdis", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="VdisT", y_col="dTdV", kmax=5, kmin=5, peak_distance=10)
+            cfg_plot = dict(cfg)
+            output_cfg = dict(cfg.get("output", {}))
+            output_cfg["root"] = str(out_root)
+            cfg_plot["output"] = output_cfg
+
+            plot_curves(df_summary, cfg_plot, cell, x_col="Vcha", y_col="dQdVcha", kmax=5, kmin=5, peak_distance=10)
+            plot_curves(df_summary, cfg_plot, cell, x_col="Qcha", y_col="dVdQcha", kmax=5, kmin=5, peak_distance=10)
+            if bool(cfg.get("analysis", {}).get("enable_discharge_ocv", False)):
+                plot_curves(df_summary, cfg_plot, cell, x_col="Vdis", y_col="dQdVdis", kmax=5, kmin=5, peak_distance=10)
+                plot_curves(df_summary, cfg_plot, cell, x_col="Qdis", y_col="dVdQdis", kmax=5, kmin=5, peak_distance=10)
+                plot_curves(df_summary, cfg_plot, cell, x_col="VdisT", y_col="dTdV", kmax=5, kmin=5, peak_distance=10)
         except Exception as e:
             logging.exception(f"[{cell}] plot_curves failed: {e}")
 
