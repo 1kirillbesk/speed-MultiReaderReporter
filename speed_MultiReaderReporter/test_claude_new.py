@@ -38,7 +38,7 @@ out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure"
 # ut_fig_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for saving
 out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-REF_NAMES = ["SPEED_LW_reference_4", "SPEED_LW_reference_5", "SPEED_LW_reference_6"]
+REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2", "SPEED_LW_reference_3"]
 
 x_col = "Vcha"
 y_col = "dQdVcha"
@@ -68,9 +68,9 @@ INPUT_STEPS = 7
 INPUT_FEATURES = len(FEATURE_COLS)
 
 TEST_NAMES = [
-    "SPEED_LW_reference_4",
-    "SPEED_LW_reference_5",
-    "SPEED_LW_reference_6",
+    "SPEED_LW_reference_1",
+    "SPEED_LW_reference_2",
+    "SPEED_LW_reference_3",
 ]
 
 EPOCHS = 500

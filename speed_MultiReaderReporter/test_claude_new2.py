@@ -48,7 +48,7 @@ interp_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature
 out_fig_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\out_figure")
 out_fig_dir.mkdir(parents=True, exist_ok=True)
 
-REF_NAMES = ["SPEED_LW_reference_16", "SPEED_LW_reference_17", "SPEED_LW_reference_18"]
+REF_NAMES = ["SPEED_LW_reference_1", "SPEED_LW_reference_2","SPEED_LW_reference_3"]
 
 x_col = "Vcha"
 y_col = "dQdVcha"
@@ -59,10 +59,10 @@ v_3 = 3.45
 
 TARGET_SOH_FEATURES = 0.995   # SOH at which to compare features (closest cells)
 TARGET_SOH_PLOT = 0.98        # SOH for interpolation grid
-SOH_STEP_TARGET = 0.93
-FEATURE_STEP_LOGLOG = 8
+SOH_STEP_TARGET = 0.955
+FEATURE_STEP_LOGLOG = 7
 THROUGHPUT_FEATURE_LOGLOG = 2000000.0 / 3600.0 / 3.4
-SOH_THROUGHPUT_TARGET = 0.93
+SOH_THROUGHPUT_TARGET = 0.955
 EXTRAPOLATE_SOH_TARGET_IF_NOT_REACHED = False
 REF_IGNORE_FIRST_WEEK = True
 REF_IGNORE_WEEKS_LE = 1.0
@@ -98,9 +98,9 @@ INPUT_STEPS = 8
 INPUT_FEATURES = len(FEATURE_COLS)
 
 TEST_NAMES = [
-    "SPEED_LW_reference_16",
-    "SPEED_LW_reference_17",
-    "SPEED_LW_reference_18",
+    "SPEED_LW_reference_1",
+    "SPEED_LW_reference_2",
+    "SPEED_LW_reference_3",
 ]
 
 EPOCHS = 500
