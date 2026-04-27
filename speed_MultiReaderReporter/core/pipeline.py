@@ -15,13 +15,12 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('E:/download/BALD/out_SAM_inhomo') / "errors.log"
-#C:/Users/Public/Documents/takedata/Speed/out_lw
 logging.basicConfig(
-    filename=str(log_path),
+    filename="errors.log",
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+
 
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
@@ -42,8 +41,9 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         except Exception as e:
             logging.exception(f"[{cell}] Failed to create output directories: {e}")
             continue
+
         try:
-            checkup_list, cycling_list = split_total_list(cell,total_list,cfg)
+            checkup_list, cycling_list = split_total_list(cell, total_list, cfg)
         except Exception as e:
             logging.exception(f"[{cell}] Failed while splitting total_list: {e}")
             continue
@@ -61,9 +61,20 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             fmt = str(cfg.get("reports", {}).get("format", "csv")).lower()
             mat_var = str(cfg.get("reports", {}).get("mat_variable", "report"))
 
-            write_report(total_list, cell_dir / "total" / "report", f"{cell} total", fmt=fmt, mat_variable=mat_var)
-            write_report(cycling_list, cell_dir / "cycling" / "report", f"{cell} cycling", fmt=fmt,
-                         mat_variable=mat_var)
+            write_report(
+                total_list,
+                cell_dir / "total" / "report",
+                f"{cell} total",
+                fmt=fmt,
+                mat_variable=mat_var,
+            )
+            write_report(
+                cycling_list,
+                cell_dir / "cycling" / "report",
+                f"{cell} cycling",
+                fmt=fmt,
+                mat_variable=mat_var,
+            )
         except Exception as e:
             logging.exception(f"[{cell}] write_report total/cycling failed: {e}")
 
@@ -131,64 +142,239 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         except Exception as e:
             logging.exception(f"[{cell}] grouped reporting/plots block failed: {e}")
 
-        # --- SoH + throughput + features (this is critical; wrap per-run) ---
+        # --- SoH + throughput + features (critical; wrap per-run) ---
         try:
             soh_cfg = cfg.get("soh", {})
             export_soh_data = bool(soh_cfg.get("export_data", True))
             include_rpt = bool(soh_cfg.get("include_rpt", True))
+
+            rpt_state_keywords = soh_cfg.get("rpt_discharge_state_keywords", ["DCH", "DISCH", "DIS", "ENTL"])
+            rpt_min_segment_s = float(soh_cfg.get("rpt_min_segment_duration_s", 60.0))
+            rpt_min_capacity = float(soh_cfg.get("rpt_min_capacity_Ah", 1e-4))
+            rpt_min_voltage_span = soh_cfg.get("rpt_min_voltage_span_V", None)
+            if rpt_min_voltage_span is not None:
+                rpt_min_voltage_span = float(rpt_min_voltage_span)
+
+            rpt_lock_step = bool(soh_cfg.get("rpt_lock_step_per_cell", True))
+            rpt_select_by_vspan = bool(soh_cfg.get("rpt_select_by_voltage_span", True))
+
             rpt_min_step = soh_cfg.get("rpt_min_step_required", None)
             if rpt_min_step is not None:
                 rpt_min_step = int(rpt_min_step)
+
             rpt_trailing_step = soh_cfg.get("rpt_trailing_step_id", None)
             if rpt_trailing_step is not None:
                 rpt_trailing_step = int(rpt_trailing_step)
+
+            locked_rpt_step_id: int | None = None
 
             rows_through = []
             for df_cyc, lbl_cyc in cycling_list:
                 try:
                     label_lower = lbl_cyc.lower()
-                    experimental_condition = parse_experiment_label(lbl_cyc)
-
                     if "soc" in label_lower:
                         df_cyc = df_cyc.copy()
                         df_cyc["abs_time"] = pd.to_datetime(df_cyc["abs_time"], errors="coerce")
                         df_cyc = df_cyc.dropna(subset=["abs_time"])
-                        df_cyc["relative_time_s"] = (df_cyc["abs_time"] - df_cyc["abs_time"].iloc[0]).dt.total_seconds()
+                        if df_cyc.empty:
+                            continue
 
-                        throughput = compute_cum_abs_charge(df_cyc, time_col="abs_time", current_col="current_A")
+                        df_cyc["relative_time_s"] = (
+                            df_cyc["abs_time"] - df_cyc["abs_time"].iloc[0]
+                        ).dt.total_seconds()
+
+                        throughput = compute_cum_abs_charge(
+                            df_cyc,
+                            time_col="abs_time",
+                            current_col="current_A",
+                        )
                         rows_through.append(throughput)
                 except Exception as e:
                     logging.exception(f"[{cell}] throughput calc failed for cycling run '{lbl_cyc}': {e}")
                     continue
 
             rows = []
+            experimental_condition = None
+
+            # SoH data containers restored here
+            soh_points = []
+            soh_rows = []
+
             for df_chk, lbl_chk in checkup_list:
                 try:
                     label_lower = lbl_chk.lower()
+
+                    # keep your experimental condition parsing
+                    parsed_condition = parse_experiment_label(lbl_chk)
+                    if parsed_condition is not None:
+                        experimental_condition = parsed_condition
+
+                    # -----------------------------
+                    # Your feature extraction block
+                    # -----------------------------
                     if "cu" in label_lower or "rpt" in label_lower:
-                        df_chk = df_chk.copy()
-                        df_chk["abs_time"] = pd.to_datetime(df_chk["abs_time"], errors="coerce")
-                        df_chk = df_chk.dropna(subset=["abs_time"])
-                        df_chk["relative_time_s"] = (df_chk["abs_time"] - df_chk["abs_time"].iloc[0]).dt.total_seconds()
+                        df_chk_feat = df_chk.copy()
+                        df_chk_feat["abs_time"] = pd.to_datetime(df_chk_feat["abs_time"], errors="coerce")
+                        df_chk_feat = df_chk_feat.dropna(subset=["abs_time"])
+                        if not df_chk_feat.empty:
+                            df_chk_feat["relative_time_s"] = (
+                                df_chk_feat["abs_time"] - df_chk_feat["abs_time"].iloc[0]
+                            ).dt.total_seconds()
 
-                        ocv_features = extract_features(df_chk, cell, cfg)
+                            ocv_features = extract_features(df_chk_feat, cell, cfg)
 
-                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse_SAM"].reset_index(drop=True)
-                        # df_filtered = (
-                        #     df_chk
-                        #     .loc[df_chk.index[df_chk["step_int"] == 26].max() + 1:]
-                        #     .query("0 <= step_int <= 15")
-                        # )
-                        pulse_feature = analyze_df_pulse(df_filtered)
+                            df_filtered = df_chk_feat[
+                                df_chk_feat["procedure"] == "rul_Pulse_SAM"
+                            ].reset_index(drop=True)
 
-                        features = ocv_features | pulse_feature
-                        rows.append(features)
+                            pulse_feature = analyze_df_pulse(df_filtered)
+
+                            features = ocv_features | pulse_feature
+                            rows.append(features)
+
+                    # -----------------------------
+                    # Restored SoH logic
+                    # -----------------------------
+                    res = None
+                    source_type = None
+                    method = None
+
+                    if "cu" in label_lower:
+                        if "step_int" not in df_chk.columns:
+                            continue
+
+                        res = compute_checkup_point_step19(
+                            df_chk,
+                            min_step_required=int(soh_cfg.get("min_step_required", 20)),
+                            eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                            i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                        )
+                        source_type = "CU"
+
+                    elif include_rpt and "rpt" in label_lower:
+                        if rpt_lock_step and locked_rpt_step_id is not None and "step_int" in df_chk.columns:
+                            res = compute_checkup_point_step(
+                                df_chk,
+                                locked_rpt_step_id,
+                                min_step_required=rpt_min_step,
+                                eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                                i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                                trailing_step_id=rpt_trailing_step,
+                                require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                            )
+                            if res is not None:
+                                method = f"locked step {locked_rpt_step_id}"
+                                print(f"[INFO] RPT SoH using locked step {locked_rpt_step_id} for cell {cell}")
+
+                        if res is None:
+                            res, dominant_step_id = compute_checkup_point_rpt_by_state(
+                                df_chk,
+                                discharge_state_keywords=rpt_state_keywords,
+                                min_segment_duration_s=rpt_min_segment_s,
+                                min_capacity_Ah=rpt_min_capacity,
+                                min_voltage_span_V=rpt_min_voltage_span,
+                                min_step_required=rpt_min_step,
+                                eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                                i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                                trailing_step_id=rpt_trailing_step,
+                                require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                                select_by_voltage_span=rpt_select_by_vspan,
+                            )
+                            if res is not None:
+                                method = "state-based"
+                                if rpt_lock_step and dominant_step_id is not None:
+                                    locked_rpt_step_id = dominant_step_id
+                                    print(
+                                        f"[INFO] Locked RPT discharge step for cell {cell} "
+                                        f"to step {dominant_step_id} (from state-based selection)"
+                                    )
+
+                        if res is None:
+                            if "step_int" not in df_chk.columns:
+                                continue
+
+                            res = compute_checkup_point_step6(
+                                df_chk,
+                                min_step_required=rpt_min_step,
+                                eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
+                                i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
+                                trailing_step_id=rpt_trailing_step,
+                                require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
+                            )
+                            method = "step-6 fallback"
+                            if res is not None:
+                                print(f"[WARN] RPT SoH fallback to step 6 for cell {cell}")
+
+                        source_type = "RPT"
+
+                    if res is not None:
+                        x_thru = cumulative_throughput_until(total_list, res.discharge_end_time)
+                        soh_points.append((x_thru, res.capacity_Ah, lbl_chk, res.discharge_end_time, source_type))
+
+                        if source_type == "RPT":
+                            print(
+                                f"[INFO] Added RPT SoH point ({method}) for cell {cell}, "
+                                f"capacity = {res.capacity_Ah:.4f} Ah @ {res.discharge_end_time}"
+                            )
+
+                        soh_rows.append({
+                            "cell_id": cell,
+                            "program_name": lbl_chk,
+                            "source_type": source_type,
+                            "step_id": res.step_id,
+                            "discharge_end_time": res.discharge_end_time,
+                            "discharge_start_time": res.discharge_start_time,
+                            "throughput_Ah": x_thru,
+                            "discharge_capacity_Ah": res.capacity_Ah,
+                            "step_start_index": res.index_start,
+                            "step_end_index": res.index_end,
+                            "step_min_voltage_V": res.min_voltage_V,
+                            "step19_start_index": res.index_start if res.step_id == 19 else None,
+                            "step19_end_index": res.index_end if res.step_id == 19 else None,
+                            "step19_min_voltage_V": res.min_voltage_V if res.step_id == 19 else None,
+                        })
+
                 except Exception as e:
-                    logging.exception(f"[{cell}] feature extraction failed for checkup run '{lbl_chk}': {e}")
+                    logging.exception(f"[{cell}] feature extraction / SoH failed for checkup run '{lbl_chk}': {e}")
                     continue
 
             if not rows:
                 logging.warning(f"[{cell}] No feature rows produced; skipping summary + save.")
+                # still write SoH if available
+                if soh_points:
+                    try:
+                        df_soh = pd.DataFrame(soh_rows)
+                        soh_dir = cell_dir / "checkup"
+                        if export_soh_data:
+                            soh_data_path = soh_dir / "soh_scatter_data.csv"
+                            df_soh.to_csv(soh_data_path, index=False)
+                            print(f"[OK] wrote SoH data: {soh_data_path}")
+
+                        legacy_df = df_soh.rename(columns={"program_name": "program"})[
+                            ["throughput_Ah", "discharge_capacity_Ah", "program", "discharge_end_time"]
+                        ]
+                        legacy_df.to_csv(
+                            soh_dir / "soh_discharge_capacity_vs_throughput.csv",
+                            index=False,
+                        )
+
+                        plt.figure(figsize=(8, 5))
+                        xs = df_soh["throughput_Ah"].to_list()
+                        ys = df_soh["discharge_capacity_Ah"].to_list()
+                        plt.scatter(xs, ys)
+                        for x, y, name in zip(xs, ys, df_soh["program_name"].to_list()):
+                            plt.annotate(name, (x, y), fontsize=8, xytext=(5, 2), textcoords="offset points")
+                        plt.xlabel("Cumulative charge throughput up to discharge [Ah]")
+                        plt.ylabel("Discharge capacity (checkup) [Ah]")
+                        plt.title(f"Cell: {cell} — SoH: Capacity vs Throughput")
+                        plt.grid(True, alpha=0.3)
+                        plt.tight_layout()
+                        plt.savefig(cell_dir / "checkup" / "soh_discharge_capacity_vs_throughput.png", dpi=160)
+                        plt.close()
+                    except Exception as e:
+                        logging.exception(f"[{cell}] Failed to save SoH outputs: {e}")
+                else:
+                    print(f"[INFO] {cell}: no valid checkup discharges found for SoH plot.")
                 continue
 
             df_summary = pd.DataFrame(rows)
@@ -201,7 +387,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                     df_time_col="CU_time",
                     dict_time_key="abs_time",
                     dict_value_key="throughput",
-                    out_col="throughput_sum"
+                    out_col="throughput_sum",
                 )
             except Exception as e:
                 logging.exception(f"[{cell}] add_throughput_column failed: {e}")
@@ -220,63 +406,75 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
         # --- derived features + plots (non-critical, but keep going if they fail) ---
         try:
-            vol_high = volt_lim["high"];
+            vol_high = volt_lim["high"]
             vol_low = volt_lim["low"]
-            vol_mhigh = volt_lim["highm"];
+            vol_mhigh = volt_lim["highm"]
             vol_mlow = volt_lim["lowm"]
 
-            mean_mid_cha, var_mid_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_mlow,
-                                                              x_hi=vol_mhigh)
-            mean_low_cha, var_low_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_low,
-                                                              x_hi=vol_mlow)
-            mean_high_cha, var_high_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="dQdVcha",
-                                                                x_lo=vol_mhigh, x_hi=vol_high)
-            mean_dQ_cha, var_dQ_cha = window_delta_mean_var(df_summary, x_col="Vcha", y_col="Q_intVcha", x_lo=vol_low,
-                                                            x_hi=vol_high)
+            mean_mid_cha, var_mid_cha = window_delta_mean_var(
+                df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_mlow, x_hi=vol_mhigh
+            )
+            mean_low_cha, var_low_cha = window_delta_mean_var(
+                df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_low, x_hi=vol_mlow
+            )
+            mean_high_cha, var_high_cha = window_delta_mean_var(
+                df_summary, x_col="Vcha", y_col="dQdVcha", x_lo=vol_mhigh, x_hi=vol_high
+            )
+            mean_dQ_cha, var_dQ_cha = window_delta_mean_var(
+                df_summary, x_col="Vcha", y_col="Q_intVcha", x_lo=vol_low, x_hi=vol_high
+            )
 
-            df_summary["mean_d_dqdv_m_c"] = mean_mid_cha;
+            df_summary["mean_d_dqdv_m_c"] = mean_mid_cha
             df_summary["var_d_dqdv_m_c"] = var_mid_cha
-            df_summary["mean_d_dqdv_l_c"] = mean_low_cha;
+            df_summary["mean_d_dqdv_l_c"] = mean_low_cha
             df_summary["var_d_dqdv_l_c"] = var_low_cha
-            df_summary["mean_d_dqdv_h_c"] = mean_high_cha;
+            df_summary["mean_d_dqdv_h_c"] = mean_high_cha
             df_summary["var_d_dqdv_h_c"] = var_high_cha
-            df_summary["mean_dQ_c"] = mean_dQ_cha;
+            df_summary["mean_dQ_c"] = mean_dQ_cha
             df_summary["var_dQ_c"] = var_dQ_cha
 
-            mean_mid_dis, var_mid_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_mlow,
-                                                              x_hi=vol_mhigh)
-            mean_low_dis, var_low_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_low,
-                                                              x_hi=vol_mlow)
-            mean_high_dis, var_high_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dQdVdis",
-                                                                x_lo=vol_mhigh, x_hi=vol_high)
-            mean_dQ_dis, var_dQ_dis = window_delta_mean_var(df_summary, x_col="Vdis", y_col="Q_intVdis", x_lo=vol_low,
-                                                            x_hi=vol_high)
+            mean_mid_dis, var_mid_dis = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_mlow, x_hi=vol_mhigh
+            )
+            mean_low_dis, var_low_dis = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_low, x_hi=vol_mlow
+            )
+            mean_high_dis, var_high_dis = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="dQdVdis", x_lo=vol_mhigh, x_hi=vol_high
+            )
+            mean_dQ_dis, var_dQ_dis = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="Q_intVdis", x_lo=vol_low, x_hi=vol_high
+            )
 
-            df_summary["mean_d_dqdv_m_d"] = mean_mid_dis;
+            df_summary["mean_d_dqdv_m_d"] = mean_mid_dis
             df_summary["var_d_dqdv_m_d"] = var_mid_dis
-            df_summary["mean_d_dqdv_l_d"] = mean_low_dis;
+            df_summary["mean_d_dqdv_l_d"] = mean_low_dis
             df_summary["var_d_dqdv_l_d"] = var_low_dis
-            df_summary["mean_d_dqdv_h_d"] = mean_high_dis;
+            df_summary["mean_d_dqdv_h_d"] = mean_high_dis
             df_summary["var_d_dqdv_h_d"] = var_high_dis
-            df_summary["mean_dQ_d"] = mean_dQ_dis;
+            df_summary["mean_dQ_d"] = mean_dQ_dis
             df_summary["var_dQ_d"] = var_dQ_dis
 
-            mean_mid_t, var_mid_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mlow,
-                                                          x_hi=vol_mhigh)
-            mean_low_t, var_low_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_low,
-                                                          x_hi=vol_mlow)
-            mean_high_t, var_high_t = window_delta_mean_var(df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mhigh,
-                                                            x_hi=vol_high)
-            mean_d_Qt, var_d_Qt = window_delta_mean_var(df_summary, x_col="Vdis", y_col="T_intV", x_lo=vol_low,
-                                                        x_hi=vol_high)
+            mean_mid_t, var_mid_t = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mlow, x_hi=vol_mhigh
+            )
+            mean_low_t, var_low_t = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_low, x_hi=vol_mlow
+            )
+            mean_high_t, var_high_t = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="dTdV", x_lo=vol_mhigh, x_hi=vol_high
+            )
+            mean_d_Qt, var_d_Qt = window_delta_mean_var(
+                df_summary, x_col="Vdis", y_col="T_intV", x_lo=vol_low, x_hi=vol_high
+            )
 
-            df_summary["mean_dqdv_mt"] = mean_mid_t;
+            df_summary["mean_dqdv_mt"] = mean_mid_t
             df_summary["var_d_dqdv_mt"] = var_mid_t
-            df_summary["mean_dqdv_lt"] = mean_low_t;
+            df_summary["mean_dqdv_lt"] = mean_low_t
             df_summary["var_d_dqdv_lt"] = var_low_t
-            df_summary["mean_dqdv_ht"] = mean_high_t;
+            df_summary["mean_dqdv_ht"] = mean_high_t
             df_summary["var_d_dqdv_ht"] = var_high_t
-            df_summary["mean_d_Qt"] = mean_d_Qt;
+            df_summary["mean_d_Qt"] = mean_d_Qt
             df_summary["var_d_Qt"] = var_d_Qt
 
         except Exception as e:
@@ -292,14 +490,16 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         except Exception as e:
             logging.exception(f"[{cell}] plot_curves failed: {e}")
 
-        # drop + save (critical save should be protected too)
-        # "Vcha", "dQdVcha", "Q_intVcha are taken",
+        # drop + save
         try:
-            df_summary = df_summary.drop(columns=[
-                "Qcha", "dVdQcha", "V_intQcha",
-                "Vdis", "dQdVdis", "Q_intVdis", "Qdis", "dVdQdis", "V_intQdis",
-                "VdisT", "dTdV", "T_intV"
-            ], errors="ignore")
+            df_summary = df_summary.drop(
+                columns=[
+                    "Qcha", "dVdQcha", "V_intQcha",
+                    "Vdis", "dQdVdis", "Q_intVdis", "Qdis", "dVdQdis", "V_intQdis",
+                    "VdisT", "dTdV", "T_intV",
+                ],
+                errors="ignore",
+            )
 
             cell_feature_dir = out_root / "cell_feature"
             cell_feature_dir.mkdir(parents=True, exist_ok=True)
@@ -308,90 +508,51 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         except Exception as e:
             logging.exception(f"[{cell}] Failed to save df_summary csv: {e}")
             continue
-                # plt.plot(df_chk["relative_time_s"],df_chk["voltage_V"])
-                # plt.show()
-        '''
-            if "cu" in label_lower:
-                if "step_int" not in df_chk.columns:
-                    continue
-                res = compute_checkup_point_step19(
-                    df_chk,
-                    min_step_required=int(soh_cfg.get("min_step_required", 20)),
-                    eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
-                    i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
-                )
-                source_type = "CU"
-            elif include_rpt and "rpt" in label_lower:
-                if "step_int" not in df_chk.columns:
-                    continue
-                res = compute_checkup_point_step6(
-                    df_chk,
-                    min_step_required=rpt_min_step,
-                    eod_v_cut=soh_cfg.get("eod_v_cut_V", None),
-                    i_thresh=float(soh_cfg.get("i_thresh_A", 0.0)),
-                    trailing_step_id=rpt_trailing_step,
-                    require_trailing_step=bool(soh_cfg.get("rpt_require_trailing_step", False)),
-                )
-                source_type = "RPT"
-            if res is None:
-                continue
-            x_thru = cumulative_throughput_until(total_list, res.discharge_end_time)
-            soh_points.append((x_thru, res.capacity_Ah, lbl_chk, res.discharge_end_time, source_type))
-            if source_type == "RPT":
-                print(f"[INFO] Added RPT SoH point for cell {cell}, step 6 discharge capacity = {res.capacity_Ah:.4f} Ah")
-            soh_rows.append({
-                "cell_id": cell,
-                "program_name": lbl_chk,
-                "source_type": source_type,
-                "step_id": res.step_id,
-                "discharge_end_time": res.discharge_end_time,
-                "discharge_start_time": res.discharge_start_time,
-                "throughput_Ah": x_thru,
-                "discharge_capacity_Ah": res.capacity_Ah,
-                "step_start_index": res.index_start,
-                "step_end_index": res.index_end,
-                "step_min_voltage_V": res.min_voltage_V,
-                "step19_start_index": res.index_start if res.step_id == 19 else None,
-                "step19_end_index": res.index_end if res.step_id == 19 else None,
-                "step19_min_voltage_V": res.min_voltage_V if res.step_id == 19 else None,
-            })
-        '''
-        '''
-        if soh_points:
-            df_soh = pd.DataFrame(soh_rows)
-            soh_dir = cell_dir / "checkup"
-            if export_soh_data:
-                soh_data_path = soh_dir / "soh_scatter_data.csv"
-                df_soh.to_csv(soh_data_path, index=False)
-                print(f"[OK] wrote SoH data: {soh_data_path}")
 
-            legacy_df = df_soh.rename(columns={"program_name": "program"})[
-                ["throughput_Ah", "discharge_capacity_Ah", "program", "discharge_end_time"]
-            ]
-            legacy_df.to_csv(soh_dir / "soh_discharge_capacity_vs_throughput.csv", index=False)
-            # simple scatter
-            import matplotlib.pyplot as plt
-            plt.figure(figsize=(8, 5))
-            xs = df_soh["throughput_Ah"].to_list(); ys = df_soh["discharge_capacity_Ah"].to_list()
-            plt.scatter(xs, ys)
-            for x, y, name in zip(xs, ys, df_soh["program_name"].to_list()):
-                plt.annotate(name, (x, y), fontsize=8, xytext=(5, 2), textcoords="offset points")
-            plt.xlabel("Cumulative charge throughput up to discharge [Ah]")
-            plt.ylabel("Discharge capacity (checkup) [Ah]")
-            plt.title(f"Cell: {cell} — SoH: Capacity vs Throughput")
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.savefig(cell_dir / "checkup" / "soh_discharge_capacity_vs_throughput.png", dpi=160)
-            plt.close()
-        else:
-            print(f"[INFO] {cell}: no valid checkup discharges found for SoH plot.")
-        '''
+        # --- save SoH outputs ---
+        try:
+            if soh_points:
+                df_soh = pd.DataFrame(soh_rows)
+                soh_dir = cell_dir / "checkup"
+                if export_soh_data:
+                    soh_data_path = soh_dir / "soh_scatter_data.csv"
+                    df_soh.to_csv(soh_data_path, index=False)
+                    print(f"[OK] wrote SoH data: {soh_data_path}")
+
+                legacy_df = df_soh.rename(columns={"program_name": "program"})[
+                    ["throughput_Ah", "discharge_capacity_Ah", "program", "discharge_end_time"]
+                ]
+                legacy_df.to_csv(soh_dir / "soh_discharge_capacity_vs_throughput.csv", index=False)
+
+                plt.figure(figsize=(8, 5))
+                xs = df_soh["throughput_Ah"].to_list()
+                ys = df_soh["discharge_capacity_Ah"].to_list()
+                plt.scatter(xs, ys)
+                for x, y, name in zip(xs, ys, df_soh["program_name"].to_list()):
+                    plt.annotate(name, (x, y), fontsize=8, xytext=(5, 2), textcoords="offset points")
+                plt.xlabel("Cumulative charge throughput up to discharge [Ah]")
+                plt.ylabel("Discharge capacity (checkup) [Ah]")
+                plt.title(f"Cell: {cell} — SoH: Capacity vs Throughput")
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+                plt.savefig(cell_dir / "checkup" / "soh_discharge_capacity_vs_throughput.png", dpi=160)
+                plt.close()
+            else:
+                print(f"[INFO] {cell}: no valid checkup discharges found for SoH plot.")
+        except Exception as e:
+            logging.exception(f"[{cell}] Failed to save SoH outputs: {e}")
+
         print(f"[INFO] {cell}: has been processed.")
 
 
-def add_throughput_column(df_summary, rows_through, df_time_col="CU_time",
-                          dict_time_key="abs_time", dict_value_key="throughput",
-                          out_col="throughput_sum"):
+def add_throughput_column(
+    df_summary,
+    rows_through,
+    df_time_col="CU_time",
+    dict_time_key="abs_time",
+    dict_value_key="throughput",
+    out_col="throughput_sum",
+):
     """
     df_summary: DataFrame with a time column (e.g., CU_time)
     rows_through: list[dict], each dict has {abs_time: ..., throughput: ...}
@@ -453,7 +614,7 @@ def parse_experiment_label(label: str):
 
     Extracts:
       - soc_start, soc_end
-      - c_rate_chg (x), c_rate_dchg (y)   [numbers around 'c']
+      - c_rate_chg (x), c_rate_dchg (y)
       - dyn (bool)
     """
 
@@ -480,7 +641,6 @@ def parse_experiment_label(label: str):
     m_c = re.search(r"_(\d+)c(\d+)_", lab)
     if m_c:
         def parse_c(val: str):
-            # minimal change: keep your old rule
             # "05" -> 0.5, "15" -> 15.0
             return int(val) / 10 if val.startswith("0") and len(val) > 1 else float(val)
 
@@ -488,4 +648,3 @@ def parse_experiment_label(label: str):
         result["c_rate_dchg"] = parse_c(m_c.group(2))
 
     return result
-
