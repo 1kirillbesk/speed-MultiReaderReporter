@@ -645,12 +645,19 @@ def main(dir_path: Path, out_dir: Path):
     z_col = "mean_d_dqdv_h_c"
     K_FARTHEST = 20
 
-    ref_sub = (
-        df_ref[df_ref["cell_name"].isin(REF_NAMES)][["cell_name", x_col, y_col, z_col]]
-        .dropna()
-        .reset_index(drop=True)
-    )
-    exp_sub = df_exp[["cell_name", x_col, y_col, z_col]].dropna().reset_index(drop=True)
+    if not df_ref.empty and "cell_name" in df_ref.columns:
+        ref_sub = (
+            df_ref[df_ref["cell_name"].isin(REF_NAMES)][["cell_name", x_col, y_col, z_col]]
+            .dropna()
+            .reset_index(drop=True)
+        )
+    else:
+        ref_sub = pd.DataFrame(columns=["cell_name", x_col, y_col, z_col])
+
+    if not df_exp.empty and "cell_name" in df_exp.columns:
+        exp_sub = df_exp[["cell_name", x_col, y_col, z_col]].dropna().reset_index(drop=True)
+    else:
+        exp_sub = pd.DataFrame(columns=["cell_name", x_col, y_col, z_col])
 
     closest_cellnames: list[str] = []
     farthest_cellnames: list[str] = []
@@ -1300,8 +1307,8 @@ def main(dir_path: Path, out_dir: Path):
 
 
 if __name__ == "__main__":
-    # dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
-    # out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for
-    dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
-    out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
+    dir_path = Path(r"C:\Users\Public\Documents\RL_project\out_lw\cell_feature")
+    out_dir = Path(r"C:\Users\Public\Documents\RL_project\out_lw\feature_plots")  # not used for
+    # dir_path = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\cell_feature")
+    # out_dir = Path(r"C:\Users\Victus\PycharmProjects\ExpSpeed\out_lw\feature_plots")
     main(dir_path, out_dir)
