@@ -1,7 +1,7 @@
 # speed_MultiReaderReporter/config.yaml
 
 input:
-  path: "C:/Users/Public/Documents/takedata/Speed/raw_data_csv"     #"C:/Users/Public/Documents/takedata/Speed/raw_data_csv"      # folder OR single file; detector will recurse if it's a folder
+  path: "E:/download/SPEED/raw_data_csv"     #"C:/Users/Public/Documents/takedata/Speed/raw_data_csv"      # folder OR single file; detector will recurse if it's a folder
   recurse: true
   name_contains: ["rul_LW", "rul_hk"]
   cell_name_contain: ["SPEED_LW"]
@@ -52,6 +52,14 @@ CU_steps:
 # 17
 logging:
   verbose: true
+
+cache:
+  # "summary_only"  -> reuse existing cell_feature/<cell>.csv when it is newer
+  #                    than the raw inputs; do not reread raw data for that cell
+  # "full_raw_plots" -> force rereading raw data even when the summary csv is
+  #                     already up to date, so full voltage/current aging plots
+  #                     and other raw-data outputs are regenerated
+  existing_cell_mode: "summary_only"
 
 checkup_grouping:
   # Use ONE of: off | report | plot | both

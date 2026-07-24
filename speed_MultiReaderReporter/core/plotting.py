@@ -220,17 +220,13 @@ def plot_curves(
         color = cmap(i / max(n - 1, 1))
         ax.plot(x, y, color=color, alpha=0.9)
 
-        # Keep only one max/min inside the window spanned by 3 pronounced peaks.
-        ext = extrema_in_three_peak_window(
-            x,
-            y,
-            distance=peak_distance if peak_distance is not None else 10,
-            top_k_window=3,
-        )
-        px_max = ext["max"]["x_peaks"]
-        py_max = ext["max"]["y_peaks"]
-        px_min = ext["min"]["x_peaks"]
-        py_min = ext["min"]["y_peaks"]
+        # ---- compute maxima/minima from curve ----
+        peaks = get_peaks(x, y, distance=peak_distance)
+        mins  = get_minima(x, y, distance=peak_distance)
+
+        # choose only top-k points
+        px_max, py_max = topk_by_y(peaks["x_peaks"], peaks["y_peaks"], kmax, largest=True)
+        px_min, py_min = topk_by_y(mins["x_peaks"],  mins["y_peaks"],  kmin, largest=False)
 
         # plot markers
         if px_max.size > 0:
@@ -269,7 +265,7 @@ def plot_curves(
 
     ax.text(
         0.01, 0.99,
-        "Peaks per row: max=1, min=1 (within 3-peak window)",
+        f"Peaks per row: max={kmax}, min={kmin} (distance={peak_distance})",
         transform=ax.transAxes,
         va="top",
         ha="left",

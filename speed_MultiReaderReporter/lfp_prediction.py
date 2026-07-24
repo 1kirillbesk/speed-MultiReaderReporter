@@ -1,4 +1,4 @@
-"""
+﻿"""
 Predict step_to_soh_target from interpolated features.
 
 Training data : cells with 'cycle' in the name (from interp_feature folder)
@@ -217,7 +217,7 @@ random_numbers = np.random.choice(range(0, 100), size=N_SEEDS, replace=False)
 y_pred_list = []
 
 for i in random_numbers:
-    print(f"\n── Seed {i} ──")
+    print(f"\n== Seed {i} ==")
     if "model" in locals():
         del model, optimizer
         torch.cuda.empty_cache()

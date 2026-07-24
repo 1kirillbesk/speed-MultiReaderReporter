@@ -62,6 +62,13 @@ def split_into_3_sections_by_step_reset(df: pd.DataFrame, step_col="step_int"):
     # You said there are 3 SOC blocks (80/50/20) -> take first 3
     return sections[:3]
 
+
+def _soc_prefix(soc_label) -> str:
+    try:
+        return f"pulse{int(round(float(soc_label) * 100.0))}"
+    except Exception:
+        return f"pulse_{str(soc_label)}"
+
 def analyze_section_pulses(
     sec: pd.DataFrame,
     voltage_col="voltage_V",
@@ -178,10 +185,6 @@ def analyze_df_pulse(
 ):
     sections = split_into_3_sections_by_step_reset(df_filtered, step_col=step_col)
 
-    # plt.plot(sections[0]['voltage_V'])
-    # plt.show()
-
-
     out = {}
     for i, sec in enumerate(sections):
         soc = soc_labels[i] if i < len(soc_labels) else f"section_{i+1}"
@@ -197,38 +200,64 @@ def analyze_df_pulse(
             "pulses": pulses,
         }
 
-    pulse_summary = {}
-    soc_map = {
-        "0.8": "pulse80% soc",
-        "0.5": "pulse50% soc",
-        "0.2": "pulse20% soc",
-    }
-    keys_to_extract = ["R_0.2s_ohm", "R_1s_ohm", "R_10s_ohm"]
-    for soc_key, out_key in soc_map.items():
-        pulses = out[soc_key]["pulses"]
-        pulse_summary[out_key] = [
-            [p[k] for k in keys_to_extract]
-            for p in pulses
-        ]
-
-    rows = []
-    for soc_label, pulse_list in pulse_summary.items():
-        for pulse in pulse_list:
-            rows.append({
-                "soc": soc_label,
-                "R_0.2s_ohm": pulse[0],
-                "R_1s_ohm": pulse[1],
-                "R_10s_ohm": pulse[2],
-            })
-
-    df_pulse = pd.DataFrame(rows)
     pulse_lists = {
-        "R_0.2s_ohm": df_pulse["R_0.2s_ohm"].tolist(),
-        "R_1s_ohm": df_pulse["R_1s_ohm"].tolist(),
-        "R_10s_ohm": df_pulse["R_10s_ohm"].tolist(),
+        "R_0.2s_ohm": [],
+        "R_1s_ohm": [],
+        "R_10s_ohm": [],
     }
+
+    for i, soc in enumerate(soc_labels):
+        soc_key = str(soc)
+        prefix = _soc_prefix(soc)
+        section_info = out.get(soc_key, {"n_rows": 0, "n_pulses": 0, "pulses": []})
+        pulses = section_info["pulses"]
+
+        pulse_lists[f"{prefix}_n_rows"] = int(section_info["n_rows"])
+        pulse_lists[f"{prefix}_n_pulses"] = int(section_info["n_pulses"])
+        pulse_lists[f"{prefix}_R_0.2s_ohm"] = [p["R_0.2s_ohm"] for p in pulses]
+        pulse_lists[f"{prefix}_R_1s_ohm"] = [p["R_1s_ohm"] for p in pulses]
+        pulse_lists[f"{prefix}_R_10s_ohm"] = [p["R_10s_ohm"] for p in pulses]
+        pulse_lists[f"{prefix}_t0_s"] = [p["t0_s"] for p in pulses]
+        pulse_lists[f"{prefix}_I_step_A"] = [p["I_step_A"] for p in pulses]
+
+        pulse_lists["R_0.2s_ohm"].extend(pulse_lists[f"{prefix}_R_0.2s_ohm"])
+        pulse_lists["R_1s_ohm"].extend(pulse_lists[f"{prefix}_R_1s_ohm"])
+        pulse_lists["R_10s_ohm"].extend(pulse_lists[f"{prefix}_R_10s_ohm"])
 
     return pulse_lists
+
+
+def extract_pulse_sections(
+    df_filtered: pd.DataFrame,
+    soc_labels=(0.8, 0.5, 0.2),
+    step_col="step_int",
+    voltage_col="voltage_V",
+    current_col="current_A",
+    time_col="abs_time",
+):
+    """
+    Extract the full pulse sections from the checkup, similar to how OCV arrays are stored.
+    Each SOC block is exported as list-like arrays for time, voltage, current, and step.
+    """
+    sections = split_into_3_sections_by_step_reset(df_filtered, step_col=step_col)
+    pulse_sections = {}
+
+    for i, soc in enumerate(soc_labels):
+        prefix = _soc_prefix(soc)
+        if i >= len(sections) or sections[i].empty:
+            pulse_sections[f"{prefix}_time_s"] = []
+            pulse_sections[f"{prefix}_voltage_V"] = []
+            pulse_sections[f"{prefix}_current_A"] = []
+            pulse_sections[f"{prefix}_step_int"] = []
+            continue
+
+        sec = sections[i].copy().reset_index(drop=True)
+        pulse_sections[f"{prefix}_time_s"] = _to_rel_seconds(sec[time_col]).tolist() if time_col in sec.columns else []
+        pulse_sections[f"{prefix}_voltage_V"] = pd.to_numeric(sec[voltage_col], errors="coerce").tolist() if voltage_col in sec.columns else []
+        pulse_sections[f"{prefix}_current_A"] = pd.to_numeric(sec[current_col], errors="coerce").tolist() if current_col in sec.columns else []
+        pulse_sections[f"{prefix}_step_int"] = pd.to_numeric(sec[step_col], errors="coerce").tolist() if step_col in sec.columns else []
+
+    return pulse_sections
 
 # --- Example usage ---
 # results = analyze_df_filtered(
