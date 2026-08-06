@@ -15,13 +15,68 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('E:/digibatt/out_digi') / "errors.log"
-#C:/Users/Public/Documents/takedata/Speed/out_lw
+log_path = Path("errors.log")
 logging.basicConfig(
     filename=str(log_path),
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+
+def _safe_name(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "").strip())
+    return safe.strip("_") or "run"
+
+def _step_from_cfg(cfg: dict, key: str, choice: int = 0):
+    values = cfg.get("CU_steps", {}).get(key, [])
+    if isinstance(values, (list, tuple)):
+        if not values:
+            return None
+        return values[min(choice, len(values) - 1)]
+    return values
+
+def save_checkup_parts(df: pd.DataFrame,
+                       out_dir: Path,
+                       run_label: str,
+                       cfg: dict,
+                       occurrence: int | None = None) -> None:
+    if not bool(cfg.get("exports", {}).get("checkup_parts", False)):
+        return
+    if "step_int" not in df.columns:
+        return
+
+    if "procedure" in df.columns:
+        rpt_mask = df["procedure"].astype(str).str.contains("Digi", case=False, na=False)
+    else:
+        rpt_mask = pd.Series(True, index=df.index)
+
+    choice = 0
+    if "current_A" in df.columns:
+        step57 = df.loc[df["step_int"] == 57, "current_A"]
+        if not step57.empty:
+            choice = int((step57 < 0).any())
+
+    parts = {
+        "ocv_charge": _step_from_cfg(cfg, "ocv_cha", choice),
+        "ocv_discharge": _step_from_cfg(cfg, "ocv_dis", choice),
+        "capacity_charge": _step_from_cfg(cfg, "capa_cha", 0),
+        "capacity_discharge": _step_from_cfg(cfg, "capa_dis", 0),
+    }
+
+    suffix = f"_{occurrence:03d}" if occurrence is not None else ""
+    run_dir = out_dir / f"{_safe_name(run_label)}{suffix}"
+    wrote_any = False
+    for part_name, step_id in parts.items():
+        if step_id is None:
+            continue
+        part_df = df.loc[(df["step_int"] == step_id) & rpt_mask].copy()
+        if part_df.empty:
+            continue
+        run_dir.mkdir(parents=True, exist_ok=True)
+        part_df.to_csv(run_dir / f"{part_name}_step_{step_id}.csv", index=False)
+        wrote_any = True
+
+    if wrote_any:
+        print(f"[OK] wrote checkup parts: {run_dir}")
 
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
@@ -162,7 +217,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                     continue
 
             rows = []
-            for df_chk, lbl_chk in checkup_list:
+            for checkup_index, (df_chk, lbl_chk) in enumerate(checkup_list, start=1):
                 try:
                     label_lower = lbl_chk.lower()
                     if "checkup" in label_lower:
@@ -170,6 +225,14 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                         df_chk["abs_time"] = pd.to_datetime(df_chk["abs_time"], errors="coerce")
                         df_chk = df_chk.dropna(subset=["abs_time"])
                         df_chk["relative_time_s"] = (df_chk["abs_time"] - df_chk["abs_time"].iloc[0]).dt.total_seconds()
+
+                        save_checkup_parts(
+                            df_chk,
+                            cell_dir / "checkup" / "parts",
+                            lbl_chk,
+                            cfg,
+                            occurrence=checkup_index,
+                        )
 
                         ocv_features = extract_features(df_chk, cell, cfg)
 

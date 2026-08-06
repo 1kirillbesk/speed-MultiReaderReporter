@@ -1,9 +1,10 @@
 # speed_MultiReaderReporter/config.yaml
 
 input:
-  path: "E:/digibatt/raw_data_csv"     #"C:/Users/Public/Documents/RL_project/raw_data_csv_digi"      # folder OR single file; detector will recurse if it's a folder
+  path: "E:/download/digi/raw_data_csv"     #"C:/Users/Public/Documents/RL_project/raw_data_csv_digi"      # folder OR single file; detector will recurse if it's a folder
   recurse: true
-  name_contains: ["DigiBatt_checkup_v2", "DigiBatt_cycling_v2"]
+  kinds: ["csvzip"]
+  name_contains: []
 # C:/Users/Public/Documents/example_reporter
 # C:/Users/Public/Documents/takedata/Speed/
 output:
@@ -12,6 +13,9 @@ output:
 reports:
   format: "csv"    # one of: csv | mat | both
   mat_variable: "report"   # name of the MATLAB struct variable
+
+exports:
+  checkup_parts: true
 
 classification:
   cycling_keywords: ["cycling"]              # force cycling when present in program name

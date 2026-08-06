@@ -37,6 +37,11 @@ def main():
 
     # ---------- discover ----------
     detected = discover_inputs(in_path, recurse=recurse)
+    allowed_kinds = cfg.get("input", {}).get("kinds", [])
+    if allowed_kinds:
+        allowed = {str(k).lower() for k in allowed_kinds}
+        detected = [d for d in detected if d.kind.lower() in allowed]
+
     name_contains = cfg.get("input", {}).get("name_contains", [])
     needles = [n.lower() for n in name_contains]
     if needles:
