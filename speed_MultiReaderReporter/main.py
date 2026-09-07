@@ -6,6 +6,14 @@ import sys
 import yaml
 import re
 
+# Make direct script execution work by exposing the package parent before imports.
+here = Path(__file__).resolve().parent
+package_parent = here.parent
+for path in (package_parent, here, here / "core", here / "loaders", here / "utils"):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
 try:
     from .loaders import csvzip_loader, mat_loader, pkl_loader
     from .utils.detect import DetectedItem, discover_inputs
@@ -14,13 +22,6 @@ except ImportError:
     from loaders import csvzip_loader, mat_loader, pkl_loader
     from utils.detect import DetectedItem, discover_inputs
     from core.pipeline import run_pipeline
-
-# --- relative paths ---
-here = Path(__file__).resolve().parent
-sys.path.append(str(here))
-sys.path.append(str(here / "core"))
-sys.path.append(str(here / "loaders"))
-sys.path.append(str(here / "utils"))
 
 MANIFEST_NAME = ".processing_manifest.json"
 CACHE_MODE_SUMMARY_ONLY = "summary_only"
@@ -115,7 +116,7 @@ def update_manifest_for_cell(manifest: dict, cell_id: str, items: list[DetectedI
 def main():
     # ---------- config ----------
     here = Path(__file__).resolve().parent
-    cfg = load_config(here / "pc602/config_lw.yaml") #config602
+    cfg = load_config(here / "pc602/config_lw.yaml")
 
     in_path = Path(cfg["input"]["path"]).resolve()
     recurse = bool(cfg["input"].get("recurse", True))

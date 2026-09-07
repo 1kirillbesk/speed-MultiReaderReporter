@@ -15,6 +15,52 @@ _SKIP_GLU: bool = False
 
 _LOG = logging.getLogger(__name__)
 
+
+def _as_keyword_tuple(value) -> tuple[str, ...]:
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        return tuple(str(v).strip().lower() for v in value if str(v).strip())
+    if isinstance(value, (str, bytes)):
+        text = str(value).strip().lower()
+        return (text,) if text else ()
+    return ()
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(k in text for k in keywords)
+
+
+def _coerce_int_list(value) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        out = []
+        for item in value:
+            s = str(item).strip()
+            if not s:
+                continue
+            out.append(int(s))
+        return out
+    s = str(value).strip()
+    return [int(s)] if s else []
+
+
+def _step_gate_passes(df: pd.DataFrame,
+                      required_any: list[int] | None,
+                      required_all: list[int] | None) -> bool:
+    if required_any is None and required_all is None:
+        return True
+    if "step_int" not in df.columns:
+        return False
+    steps = set(pd.to_numeric(df["step_int"], errors="coerce").dropna().astype(int).tolist())
+    if required_all:
+        if not all(step in steps for step in required_all):
+            return False
+    if required_any is not None:
+        if not required_any:
+            return True
+        return any(step in steps for step in required_any)
+    return True
+
 def configure_from_config(cfg: dict) -> None:
     """
     Optional: call once at startup to override defaults from config.yaml.
@@ -59,19 +105,38 @@ def is_checkup_run(program_name: str, df: pd.DataFrame, cu_keywords) -> bool:
 def split_total_list(cell, total_list,cfg):
     checkup_list, cycling_list = [], []
 
-    # keywords
-    rpt_keywords = tuple(cfg["classification"]["rpt_keywords"])   # checkups defined ONLY by these in pairing mode
-    cu_keyword = cfg["classification"]["cu_keyword"]         # normal mode checkup marker
+    cls_cfg = cfg.get("classification", {})
+    legacy_rpt_keywords = _as_keyword_tuple(cls_cfg.get("rpt_keywords", ()))
+    legacy_cu_keyword = _as_keyword_tuple(cls_cfg.get("cu_keyword", ()))
+
+    pairing_keywords = _as_keyword_tuple(cls_cfg.get("pairing_keywords", legacy_rpt_keywords))
+    standalone_keywords = _as_keyword_tuple(
+        cls_cfg.get("standalone_checkup_keywords", legacy_cu_keyword)
+    )
+
+    pairing_mode = str(cls_cfg.get("pairing_mode", "auto")).strip().lower()
+    required_any = _coerce_int_list(cls_cfg.get("checkup_required_steps_any"))
+    required_all = _coerce_int_list(cls_cfg.get("checkup_required_steps_all"))
+
+    # Preserve the older lw-specific behavior unless a newer step gate is configured.
+    uses_legacy_keywords = "standalone_checkup_keywords" not in cls_cfg and "pairing_keywords" not in cls_cfg
+    if uses_legacy_keywords and required_any is None and required_all is None and legacy_cu_keyword:
+        required_any = [34]
 
     n = len(total_list)
 
-    # --- First pass: estimate how many "rpt" checkups exist (for mode decision) ---
+    # --- First pass: estimate how many pairable checkups exist (for mode decision) ---
     rpt_count = sum(
         1 for _, label in total_list
-        if any(k in (label or "").lower() for k in rpt_keywords)
+        if _contains_any((label or "").lower(), pairing_keywords)
     )
 
-    pairing_mode = rpt_count < (n / 2)
+    if pairing_mode == "always":
+        pairing_enabled = bool(pairing_keywords)
+    elif pairing_mode == "never":
+        pairing_enabled = False
+    else:
+        pairing_enabled = bool(pairing_keywords) and rpt_count < (n / 2)
 
     i = 0
     while i < n:
@@ -81,11 +146,11 @@ def split_total_list(cell, total_list,cfg):
         # -------------------------
         # MODE A: Pair lw_rpt with immediately previous item
         # -------------------------
-        if pairing_mode:
-            if any(k in label_lower for k in rpt_keywords):
+        if pairing_enabled:
+            if _contains_any(label_lower, pairing_keywords):
                 if i == 0:
                     # No previous item exists
-                    logging.warning(f"[{cell}] '{label}' is lw_rpt but has no previous item; putting into checkup as-is.")
+                    logging.warning(f"[{cell}] '{label}' is pairable checkup but has no previous item; putting into checkup as-is.")
                     checkup_list.append((df, label))
                     i += 1
                     continue
@@ -108,7 +173,7 @@ def split_total_list(cell, total_list,cfg):
                 i += 1
                 continue
 
-            # Not an lw_rpt: by default cycling (for now)
+            # Not a pairable checkup: by default cycling (for now)
             cycling_list.append((df, label))
             i += 1
             continue
@@ -117,9 +182,11 @@ def split_total_list(cell, total_list,cfg):
         # MODE B: Normal logic
         # If label has lw_cu => checkup, else cycling
         # -------------------------
-        if cu_keyword in label_lower:
-            if (df["step_int"] == 34).any():
+        if _contains_any(label_lower, standalone_keywords) or _contains_any(label_lower, pairing_keywords):
+            if _step_gate_passes(df, required_any, required_all):
                 checkup_list.append((df, label))
+            else:
+                cycling_list.append((df, label))
         else:
             cycling_list.append((df, label))
 
@@ -128,12 +195,12 @@ def split_total_list(cell, total_list,cfg):
     # --- Cleanup for pairing mode to avoid double-counting prev items ---
     # The pop logic above handles the common case where i-1 was appended just before.
     # This additional pass ensures correctness if your loop changes later:
-    if pairing_mode:
+    if pairing_enabled:
         # Any item that is immediately before an lw_rpt should not remain in cycling
         indices_before_rpt = set()
         for idx in range(1, n):
             lbl = (total_list[idx][1] or "").lower()
-            if any(k in lbl for k in rpt_keywords):
+            if _contains_any(lbl, pairing_keywords):
                 indices_before_rpt.add(idx - 1)
 
         # rebuild cycling_list based on original order + indices to exclude
@@ -141,7 +208,7 @@ def split_total_list(cell, total_list,cfg):
             (df, lbl)
             for idx, (df, lbl) in enumerate(total_list)
             if idx not in indices_before_rpt
-            and not any(k in (lbl or "").lower() for k in rpt_keywords)  # lw_rpt itself is checkup
+            and not _contains_any((lbl or "").lower(), pairing_keywords)
         ] + [
             x for x in cycling_list
             if False  # placeholder; we rebuilt above to be safe

@@ -22,10 +22,36 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
+
+def _cfg_keywords(cfg: dict | None, key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    cls = (cfg or {}).get("classification", {}) if cfg else {}
+    raw = cls.get(key)
+    if isinstance(raw, (list, tuple, set)):
+        values = tuple(str(v).strip().lower() for v in raw if str(v).strip())
+        return values or default
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        return (text,) if text else default
+    return default
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(k in text for k in keywords)
+
+
+def _mask_contains_any(series: pd.Series, keywords: tuple[str, ...]) -> pd.Series:
+    lowered = series.astype(str).str.lower()
+    mask = pd.Series(False, index=series.index)
+    for kw in keywords:
+        mask = mask | lowered.str.contains(kw, case=False, na=False, regex=False)
+    return mask
+
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
     configure_from_config(cfg)
     volt_lim = cfg.get("voltage")
+    feature_label_keywords = _cfg_keywords(cfg, "feature_label_keywords", ("cu", "rpt"))
+    pulse_keywords = _cfg_keywords(cfg, "procedure_pulse_keywords", ("pulse",))
 
     # group by cell
     by_cell: dict[str, list[tuple[pd.DataFrame, str]]] = defaultdict(list)
@@ -164,7 +190,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             for df_chk, lbl_chk in checkup_list:
                 try:
                     label_lower = lbl_chk.lower()
-                    if "cu" in label_lower or "rpt" in label_lower:
+                    if _contains_any(label_lower, feature_label_keywords):
                         df_chk = df_chk.copy()
                         df_chk["abs_time"] = pd.to_datetime(df_chk["abs_time"], errors="coerce")
                         df_chk = df_chk.dropna(subset=["abs_time"])
@@ -172,7 +198,7 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
                         ocv_features = extract_features(df_chk, cell, cfg)
 
-                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse"].reset_index(drop=True)
+                        df_filtered = df_chk[_mask_contains_any(df_chk["procedure"], pulse_keywords)].reset_index(drop=True)
                         pulse_feature = analyze_df_pulse(df_filtered)
 
                         features = ocv_features | pulse_feature

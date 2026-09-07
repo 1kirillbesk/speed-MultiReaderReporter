@@ -321,18 +321,61 @@ def compute_checkup_point_step6(g: pd.DataFrame, *,
 
 # here, analyze the checkup part
 def extract_features(df,cell,cfg):
+    def _keywords(value) -> tuple[str, ...]:
+        if isinstance(value, (list, tuple, set)):
+            return tuple(str(v).strip().lower() for v in value if str(v).strip())
+        if isinstance(value, str):
+            text = value.strip().lower()
+            return (text,) if text else ()
+        return ()
+
+    def _contains_keywords(series: pd.Series, keywords: tuple[str, ...]) -> pd.Series:
+        if not keywords:
+            return pd.Series(False, index=series.index)
+        out = pd.Series(False, index=series.index)
+        lowered = series.astype(str).str.lower()
+        for kw in keywords:
+            out = out | lowered.str.contains(kw, case=False, na=False, regex=False)
+        return out
+
+    def _step_choice(values, choice: int, fallback: list[int]) -> int:
+        if isinstance(values, (list, tuple)):
+            if not values:
+                values = fallback
+            if len(values) > choice:
+                return int(values[choice])
+            return int(values[-1])
+        return int(values)
+
+    def _last_qstep(frame: pd.DataFrame) -> float:
+        if frame.empty or "qstep" not in frame.columns:
+            return np.nan
+        return frame["qstep"].iloc[-1]
+
     features = {}
     enable_discharge_ocv = bool(cfg.get("analysis", {}).get("enable_discharge_ocv", False))
     # dt = df["relative_time_s"].diff()
     # CU_num = [17, 2, 6, 9]
     proc = df["procedure"].astype(str)
-    if df["procedure"].str.contains("lw_cu", case=False, na=False).any():
+    analysis_cfg = cfg.get("analysis", {}) if isinstance(cfg, dict) else {}
+    main_proc_keywords = _keywords(analysis_cfg.get("main_procedure_keywords"))
+    charge_proc_keywords = _keywords(analysis_cfg.get("charge_procedure_keywords"))
+    discharge_proc_keywords = _keywords(analysis_cfg.get("discharge_procedure_keywords"))
+
+    if main_proc_keywords:
+        choice = 0
+        rpt_mask = _contains_keywords(proc, main_proc_keywords)
+        charge_mask = _contains_keywords(proc, charge_proc_keywords) if charge_proc_keywords else rpt_mask
+        rpt_cyc_mask = _contains_keywords(proc, discharge_proc_keywords) if discharge_proc_keywords else rpt_mask
+    elif df["procedure"].str.contains("lw_cu", case=False, na=False).any():
         choice = 1
         rpt_mask = (df["procedure"].str.contains("lw_cu", case=False, na=False))
+        charge_mask = rpt_mask
         rpt_cyc_mask = (df["procedure"].str.contains("lw_cu", case=False, na=False))
     else:
         choice = 0
         rpt_mask = (df["procedure"].str.contains("rpt", case=False, na=False))
+        charge_mask = rpt_mask
         rpt_cyc_mask = (df["procedure"].str.contains("LWcp", case=False, na=False))
         lwcp_rows = proc[proc.str.contains("LWcp", case=False, na=False)]
 
@@ -347,22 +390,22 @@ def extract_features(df,cell,cfg):
     capa_cha_steps = cu_steps_cfg.get("capa_cha", [2, 15, 2])
     capa_dis_steps = cu_steps_cfg.get("capa_dis", [11, 9, 12])
 
-    ocv_cha_step = ocv_cha_steps[choice]
-    ocv_dis_step = ocv_dis_steps[choice]
-    capa_cha_step = capa_cha_steps[choice]
-    capa_dis_step = capa_dis_steps[choice]
+    ocv_cha_step = _step_choice(ocv_cha_steps, choice, [9, 22, 9])
+    ocv_dis_step = _step_choice(ocv_dis_steps, choice, [6, 19, 6])
+    capa_cha_step = _step_choice(capa_cha_steps, choice, [2, 15, 2])
+    capa_dis_step = _step_choice(capa_dis_steps, choice, [11, 9, 12])
     mask_ocv_cha = ((df["step_int"] == ocv_cha_step) & rpt_mask)
     mask_ocv_dis = ((df["step_int"] == ocv_dis_step) & rpt_mask)
-    mask_capa_cha = ((df["step_int"] == capa_cha_step) & rpt_mask)
+    mask_capa_cha = ((df["step_int"] == capa_cha_step) & charge_mask)
     mask_capa_dis = ((df["step_int"] == capa_dis_step) & rpt_cyc_mask)
 
     df_ocv_cha = df.loc[mask_ocv_cha]; df_ocv_dis = df.loc[mask_ocv_dis]
     df_capa_cha = df.loc[mask_capa_cha]; df_capa_dis = df.loc[mask_capa_dis]
 
     features['CU_time'] = df["abs_time"].iloc[0]
-    features['cap_dis'] = df_capa_cha["qstep"].iloc[-1]; features['cap_cha'] = df_capa_cha["qstep"].iloc[-1]
-    features['cap_ocv_cha'] = df_ocv_cha["qstep"].iloc[-1]
-    features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1] if (enable_discharge_ocv and not df_ocv_dis.empty) else np.nan
+    features['cap_dis'] = _last_qstep(df_capa_dis); features['cap_cha'] = _last_qstep(df_capa_cha)
+    features['cap_ocv_cha'] = _last_qstep(df_ocv_cha)
+    features['cap_ocv_dis'] = _last_qstep(df_ocv_dis) if enable_discharge_ocv else np.nan
     # todo: make the input a list for shorter code
     # get the ICA info for feature extraction
     V_cha, dQdV_cha, Q_intcha = extract_ICA(df_ocv_cha, cell, cfg)
