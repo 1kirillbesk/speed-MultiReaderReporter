@@ -5,6 +5,11 @@ import numpy as np
 import pandas as pd
 from typing import Iterable
 
+try:
+    from .family import resolve_family_cfg, as_list
+except ImportError:  # direct script execution with core/ on sys.path
+    from family import resolve_family_cfg, as_list
+
 # ----- defaults (used if configure_from_config isn't called) -----
 _CHECKUP_KEYWORDS: tuple[str, ...] = ("cu", "glu", "rpt")
 _CYCLING_KEYWORDS: tuple[str, ...] = ("cyc",)
@@ -61,18 +66,27 @@ def split_total_list(cell, total_list, cfg):
     total_list: list of tuples -> (df, label)
 
     Pre-processing logic (runs before the main while-loop):
-      - ONLY if "homocomp" in label (case-insensitive)
+      - ONLY if classification.split_label_keyword (default "homocomp") is in the
+        label (case-insensitive); set it to null to disable for a family
       - and df contains (step_int == 16) AND (state contains "SAVE")
       - then replace that single (df,label) with TWO elements:
             1) df where step_int > 16   (FIRST)
             2) df where step_int <= 16  (AFTER)
         (label stays identical for both)
     """
+    cfg = resolve_family_cfg(cfg, cell)
     checkup_list, cycling_list = [], []
 
     # keywords
-    rpt_keywords = tuple(cfg["classification"]["rpt_keywords"])
-    cu_keyword = cfg["classification"]["cu_keyword"]
+    cls_cfg = cfg["classification"]
+    rpt_keywords = tuple(str(k).lower() for k in cls_cfg["rpt_keywords"])
+    cu_keywords = tuple(k.lower() for k in as_list(cls_cfg["cu_keyword"]))
+    split_kw = cls_cfg.get("split_label_keyword", "homocomp")
+    split_kw = str(split_kw).lower() if split_kw else None
+    # Families whose checkup file is self-contained do not need the rpt segment
+    # concatenated onto the preceding cycling segment.
+    allow_pairing = bool(cls_cfg.get("pair_rpt_with_previous", True))
+    required_step = cls_cfg.get("checkup_required_step", 34)
 
     # ------------------------------------------------------------------
     # NEW: preprocess total_list (split homocomp items if condition holds)
@@ -81,8 +95,8 @@ def split_total_list(cell, total_list, cfg):
     for df, label in total_list:
         label_lower = (label or "").lower()
 
-        # ONLY apply logic to labels containing "homocomp"
-        if "homocomp" in label_lower:
+        # ONLY apply logic to labels containing the configured split keyword
+        if split_kw and split_kw in label_lower:
             try:
                 if "step_int" in df.columns and "state" in df.columns:
                     cond_step16 = (df["step_int"] == 16).any()
@@ -116,7 +130,7 @@ def split_total_list(cell, total_list, cfg):
         1 for _, label in total_list
         if any(k in (label or "").lower() for k in rpt_keywords)
     )
-    pairing_mode = rpt_count < (n / 2)
+    pairing_mode = allow_pairing and rpt_count < (n / 2)
 
     i = 0
     while i < n:
@@ -162,8 +176,8 @@ def split_total_list(cell, total_list, cfg):
         # -------------------------
         # MODE B: Normal logic
         # -------------------------
-        if cu_keyword in label_lower:
-            if (df["step_int"] == 34).any():
+        if any(k in label_lower for k in cu_keywords):
+            if required_step is None or (df["step_int"] == int(required_step)).any():
                 checkup_list.append((df, label))
         else:
             cycling_list.append((df, label))

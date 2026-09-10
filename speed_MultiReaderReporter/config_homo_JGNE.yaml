@@ -3,7 +3,10 @@
 input:
   path: "E:/download/jgne/raw_data_csv"     #"C:/Users/Public/Documents/takedata/Speed/raw_data_csv"      # folder OR single file; detector will recurse if it's a folder
   recurse: true
-  name_contains: ["homocomp_jgne"]
+  name_contains: ["homocomp_jgne", "SPEED_LWHK"]
+  # Optional second filter, matched against the cell id with a (_|end) boundary,
+  # so "SPEED_LWHK_cycle_3" will NOT also pull in cycle_30..39. Empty = all cells.
+  cell_name_contain: []
 # C:/Users/Public/Documents/example_reporter
 # C:/Users/Public/Documents/takedata/Speed/
 output:
@@ -18,7 +21,64 @@ classification:
   checkup_keywords: ["jgne_cu", "jgne_rpt"]
   duration_threshold_minutes: 60    # < 1h → checkup
   rpt_keywords: ["jgne_cu","jgne_rpt"]
-  cu_keyword: "jgne_cu"
+  cu_keyword: "jgne_cu"             # str or list of str
+
+# Procedure names (matched case-insensitively against the Prozedur column):
+#   rpt -> rows carrying the checkup (OCV charge/discharge + capacity charge)
+#   cyc -> rows carrying the capacity discharge
+procedures:
+  rpt: "jgne_rpt"
+  cyc: "homocomp"
+
+# ---------------------------------------------------------------------------
+# Per-cell-family overrides. The first family whose `match` substring occurs in
+# the cell id wins; every key it omits falls back to the top-level value above.
+# Drop this block entirely and the config behaves exactly as a single-family one.
+# ---------------------------------------------------------------------------
+families:
+  - name: jgne
+    match: ["SPEED_JGNE"]
+    procedures:
+      rpt: "jgne_rpt"               # rul_JGNE_RPT_0C1
+      cyc: "homocomp"               # rul_homocomp_JGNE_*
+    classification:
+      rpt_keywords: ["jgne_cu","jgne_rpt"]
+      cu_keyword: "jgne_cu"
+      split_label_keyword: "homocomp"
+      pair_rpt_with_previous: true  # RPT segment lives beside the cycling segment
+      checkup_required_step: 34
+    voltage:
+      high: 3.6
+      highm: 3.45
+      lowm: 3.35
+      low: 2.5
+    CU_steps:
+      ocv_cha: 9
+      ocv_dis: 6
+      capa_cha: 2
+      capa_dis: 12
+
+  - name: lwhk
+    match: ["SPEED_LWHK"]
+    procedures:
+      rpt: "lw_cu"                  # rul_eka_LW_CU_varCapa_relax
+      cyc: "lw_cu"                  # capacity discharge sits in the same procedure
+    classification:
+      rpt_keywords: ["lw_cu"]
+      cu_keyword: "lw_cu"
+      split_label_keyword: null     # no step-16/SAVE split for this family
+      pair_rpt_with_previous: false # the checkup file is self-contained
+      checkup_required_step: null   # LWHK checkups top out at step 28
+    voltage:
+      high: 3.6
+      highm: 3.45
+      lowm: 3.35
+      low: 2.0
+    CU_steps:
+      ocv_cha: 22                   # +0.18 A, 2.515 -> 3.600 V
+      ocv_dis: 19                   # -0.18 A, 3.462 -> 2.000 V
+      capa_cha: 15                  # +0.90 A
+      capa_dis: 9                   # -0.90 A
 
 
 soh:
@@ -48,6 +108,14 @@ CU_steps:
 
 logging:
   verbose: true
+
+cache:
+  # "summary_only"   -> skip a cell whose raw inputs are unchanged (same mtime +
+  #                     size as recorded in .processing_manifest.json) and whose
+  #                     cell_feature/<cell>.csv already exists
+  # "full_raw_plots" -> always reread the raw data, so the voltage/current aging
+  #                     plots and other raw-data outputs are regenerated too
+  existing_cell_mode: "summary_only"
 
 checkup_grouping:
   # Use ONE of: off | report | plot | both

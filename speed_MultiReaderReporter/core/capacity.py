@@ -8,7 +8,15 @@ from scipy.signal import find_peaks
 
 import matplotlib.pyplot as plt
 from matplotlib import cm
+import logging
 import os
+
+try:
+    from .family import resolve_family_cfg
+except ImportError:  # direct script execution with core/ on sys.path
+    from family import resolve_family_cfg
+
+_LOG = logging.getLogger(__name__)
 
 
 def hampel_filter(x, k=11, t0=3.0):
@@ -319,23 +327,38 @@ def compute_checkup_point_step6(g: pd.DataFrame, *,
         require_trailing_step=require_trailing_step,
     )
 
+def _checkup_procedures(cfg: dict) -> tuple[str, str]:
+    """Procedure names that carry the checkup (rpt) and the capacity discharge (cyc).
+
+    Defaults reproduce the previous hard-coded JGNE behaviour.
+    """
+    proc = (cfg or {}).get("procedures", {}) or {}
+    return str(proc.get("rpt", "jgne_rpt")), str(proc.get("cyc", "homocomp"))
+
+def _cu_steps(cfg: dict, choice: int) -> dict[str, int]:
+    """Read CU_steps as either a scalar per key (new) or a list indexed by `choice` (legacy)."""
+    steps = {}
+    for key in ("ocv_cha", "ocv_dis", "capa_cha", "capa_dis"):
+        val = cfg["CU_steps"][key]
+        if isinstance(val, (list, tuple)):
+            val = val[choice] if choice < len(val) else val[-1]
+        steps[key] = int(val)
+    return steps
+
 # here, analyze the checkup part
 def extract_features(df,cell,cfg):
+    cfg = resolve_family_cfg(cfg, cell)
     features = {}
     # dt = df["relative_time_s"].diff()
     # CU_num = [17, 2, 6, 9]
-    if df["procedure"].str.contains("jgne_rpt", case=False, na=False).any():
-        choice = 1
-        rpt_mask = (df["procedure"].str.contains("jgne_rpt", case=False, na=False))
-        rpt_cyc_mask = (df["procedure"].str.contains("homocomp", case=False, na=False))
-    else:
-        choice = 0
-        rpt_mask = (df["procedure"].str.contains("jgne_rpt", case=False, na=False))
-        rpt_cyc_mask = (df["procedure"].str.contains("homocomp", case=False, na=False))
+    rpt_proc, cyc_proc = _checkup_procedures(cfg)
+    rpt_mask = (df["procedure"].str.contains(rpt_proc, case=False, na=False))
+    rpt_cyc_mask = (df["procedure"].str.contains(cyc_proc, case=False, na=False))
+    choice = 1 if rpt_mask.any() else 0
 
-
-    ocv_cha_step = cfg['CU_steps']['ocv_cha'][choice]; ocv_dis_step = cfg['CU_steps']['ocv_dis'][choice]
-    capa_cha_step = cfg['CU_steps']['capa_cha'][choice]; capa_dis_step = cfg['CU_steps']['capa_dis'][choice]
+    steps = _cu_steps(cfg, choice)
+    ocv_cha_step = steps['ocv_cha']; ocv_dis_step = steps['ocv_dis']
+    capa_cha_step = steps['capa_cha']; capa_dis_step = steps['capa_dis']
     mask_ocv_cha = ((df["step_int"] == ocv_cha_step) & rpt_mask)
     mask_ocv_dis = ((df["step_int"] == ocv_dis_step) & rpt_mask)
     mask_capa_cha = ((df["step_int"] == capa_cha_step) & rpt_mask)
@@ -343,6 +366,18 @@ def extract_features(df,cell,cfg):
 
     df_ocv_cha = df.loc[mask_ocv_cha]; df_ocv_dis = df.loc[mask_ocv_dis]
     df_capa_cha = df.loc[mask_capa_cha]; df_capa_dis = df.loc[mask_capa_dis]
+
+    # Fail with the reason instead of an IndexError on the empty .iloc[-1] below.
+    for name, sub, step, proc in (("ocv_cha", df_ocv_cha, ocv_cha_step, rpt_proc),
+                                  ("ocv_dis", df_ocv_dis, ocv_dis_step, rpt_proc),
+                                  ("capa_cha", df_capa_cha, capa_cha_step, rpt_proc),
+                                  ("capa_dis", df_capa_dis, capa_dis_step, cyc_proc)):
+        if sub.empty:
+            raise ValueError(
+                f"[{cell}] no rows for {name}: step {step} within procedure ~ {proc!r} "
+                f"(family={cfg.get('_family', 'top-level')}); "
+                f"procedures present: {sorted(set(df['procedure'].dropna().astype(str)))}"
+            )
 
     features['CU_time'] = df["abs_time"].iloc[0]
     features['cap_dis'] = df_capa_dis["qstep"].iloc[-1]; features['cap_cha'] = df_capa_cha["qstep"].iloc[-1]

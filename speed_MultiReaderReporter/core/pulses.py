@@ -204,11 +204,13 @@ def analyze_df_pulse(
         "0.2": "pulse20% soc",
     }
     keys_to_extract = ["R_0.2s_ohm", "R_1s_ohm", "R_10s_ohm"]
-    for soc_key, out_key in soc_map.items():
-        pulses = out[soc_key]["pulses"]
+    # Iterate the sections actually present: a checkup whose pulse block is a
+    # single current staircase at one SOC yields fewer than three sections.
+    for soc_key, section in out.items():
+        out_key = soc_map.get(soc_key, f"pulse {soc_key}")
         pulse_summary[out_key] = [
             [p[k] for k in keys_to_extract]
-            for p in pulses
+            for p in section["pulses"]
         ]
 
     rows = []
@@ -221,7 +223,7 @@ def analyze_df_pulse(
                 "R_10s_ohm": pulse[2],
             })
 
-    df_pulse = pd.DataFrame(rows)
+    df_pulse = pd.DataFrame(rows, columns=["soc", "R_0.2s_ohm", "R_1s_ohm", "R_10s_ohm"])
     pulse_lists = {
         "R_0.2s_ohm": df_pulse["R_0.2s_ohm"].tolist(),
         "R_1s_ohm": df_pulse["R_1s_ohm"].tolist(),
