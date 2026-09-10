@@ -42,8 +42,7 @@ ARRAY_COLS = {"Vcha", "dQdVcha", "Q_intVcha",
               "peakV_max_dis", "peakICA_max_dis", "peakQ_max_dis", "peakDVA_max_dis",
               "peakV_min_dis", "peakICA_min_dis", "peakQ_min_dis", "peakDVA_min_dis"}
 
-JGNE_CONDITIONS = ["soc_start", "soc_end", "pause_h", "has_pulse", "low_soc",
-                   "is_ref", "temp_C", "c_rate_chg", "c_rate_dchg"]
+JGNE_CONDITIONS = ["soc_start", "soc_end", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"]
 
 # ---------------------------------------------------------------- shared core
 

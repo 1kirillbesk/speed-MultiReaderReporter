@@ -8,10 +8,10 @@ filename, decodes the condition encoded in that label, and writes one row per
 Label grammar, e.g. rul_homocomp_JGNE_40SOC100_220h_40h_pulse:
     <prefix>_<soc_start>SOC<soc_end>[_<n>h]...[_suffix]...
       <a>SOC<b>   SOC window the cell is cycled between
-      _<n>h       pause time in hours (a label may carry two, e.g. _220h_40h)
+      _<n>h       pause time in hours; if a label has several
+                  (e.g. _220h_40h) the LAST one is the pause
       _pulse      the program contains relaxation pulses
       _lowSOC     low-SOC variant
-      _ref        reference cell (no pause)
       _<n>T       ambient temperature in degC (default 25 when absent)
       _<x>C<y>C   charge / discharge C-rate
 
@@ -60,8 +60,8 @@ def parse_condition(label: str) -> dict:
     lab = (label or "").lower()
     out = {
         "soc_start": None, "soc_end": None,
-        "pause_h": None, "pause_h_2": None, "pause_raw": None,
-        "has_pulse": False, "low_soc": False, "is_ref": False,
+        "pause_h": None,
+        "has_pulse": False, "low_soc": False,
         "temp_C": DEFAULT_TEMP_C,
         "c_rate_chg": None, "c_rate_dchg": None,
     }
@@ -71,17 +71,14 @@ def parse_condition(label: str) -> dict:
         out["soc_start"] = int(m.group(1))
         out["soc_end"] = int(m.group(2))
 
-    # A label may carry more than one pause token (e.g. _220h_40h); keep both.
+    # A label can carry more than one _<n>h token (e.g. _220h_40h). The LAST one
+    # is the pause; any earlier number is something else and is ignored.
     hours = re.findall(r"_(\d+)h(?=_|$)", lab)
     if hours:
-        out["pause_h"] = int(hours[0])
-        out["pause_raw"] = "_".join(f"{h}h" for h in hours)
-        if len(hours) > 1:
-            out["pause_h_2"] = int(hours[1])
+        out["pause_h"] = int(hours[-1])
 
     out["has_pulse"] = "_pulse" in lab
     out["low_soc"] = "lowsoc" in lab
-    out["is_ref"] = bool(re.search(r"_ref(?=_|$)", lab))
 
     m = re.search(r"_(\d+)t(?=_|$)", lab)
     if m:

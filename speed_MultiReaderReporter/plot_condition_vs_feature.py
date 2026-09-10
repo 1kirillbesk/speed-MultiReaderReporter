@@ -31,8 +31,7 @@ DEFAULT_OUT_DIR = Path("E:/download/jgne/out_jgne")
 DEFAULT_FEATURE = "mean_d_dqdv_m_c"
 
 FAMILY_CONDITIONS = {
-    "jgne": ["soc_start", "soc_end", "pause_h", "has_pulse", "low_soc",
-             "is_ref", "temp_C", "c_rate_chg", "c_rate_dchg"],
+    "jgne": ["soc_start", "soc_end", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"],
     "lwhk": ["fec", "rest_min", "ref"],
 }
 
