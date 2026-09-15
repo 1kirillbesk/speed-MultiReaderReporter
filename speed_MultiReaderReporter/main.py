@@ -116,7 +116,7 @@ def update_manifest_for_cell(manifest: dict, cell_id: str, items: list[DetectedI
 def main():
     # ---------- config ----------
     here = Path(__file__).resolve().parent
-    cfg = load_config(here / "config_homo_JGNE.yaml")
+    cfg = load_config(here / "config_bald_homocomp.yaml")
 
     in_path = Path(cfg["input"]["path"]).resolve()
     recurse = bool(cfg["input"].get("recurse", True))

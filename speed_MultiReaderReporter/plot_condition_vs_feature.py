@@ -31,8 +31,10 @@ DEFAULT_OUT_DIR = Path("E:/download/jgne/out_jgne")
 DEFAULT_FEATURE = "mean_d_dqdv_m_c"
 
 FAMILY_CONDITIONS = {
-    "jgne": ["soc_start", "soc_end", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"],
+    "jgne": ["soc_start", "soc_end", "soc_mean", "soc_dod", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"],
     "lwhk": ["fec", "rest_min", "ref"],
+    "bald": ["soc_start", "soc_end", "soc_mean", "soc_dod", "c_rate", "temp_C", "dyn", "sdod", "scur",
+             "pau", "short", "pulsecyc", "pause_h", "dod", "n_cyc"],
 }
 
 def soh_tag(target_soh: float) -> str:
@@ -112,9 +114,21 @@ def write_heatmap(df, features, conditions, args, dest, spearmanr):
                  .head(15).to_string(index=False))
 
 def plot_grid(df, features, conditions, args, dest, spearmanr):
-    """One panel per (feature, condition): features down, conditions across."""
+    """One panel per (feature, condition), paginated.
+
+    A 30 x 7 grid on one canvas is unreadable, so features are split across
+    several figures of --per-page rows each.
+    """
+    per = max(1, int(getattr(args, "per_page", 8)))
+    pages = [features[i:i + per] for i in range(0, len(features), per)]
+    for pg, chunk in enumerate(pages, start=1):
+        suffix = f"_p{pg}of{len(pages)}" if len(pages) > 1 else ""
+        _plot_grid_page(df, chunk, conditions, args, dest, spearmanr, suffix, pg, len(pages))
+
+def _plot_grid_page(df, features, conditions, args, dest, spearmanr,
+                    suffix, page, n_pages):
     nrow, ncol = len(features), len(conditions)
-    fig, axes = plt.subplots(nrow, ncol, figsize=(3.5 * ncol, 2.7 * nrow),
+    fig, axes = plt.subplots(nrow, ncol, figsize=(2.5 * ncol, 1.9 * nrow),
                              squeeze=False)
     for i, feat in enumerate(features):
         y_all = pd.to_numeric(df[feat], errors="coerce")
@@ -123,25 +137,27 @@ def plot_grid(df, features, conditions, args, dest, spearmanr):
             x_all = pd.to_numeric(df[cond], errors="coerce")
             m = x_all.notna() & y_all.notna()
             x, y = x_all[m], y_all[m]
-            ax.scatter(x, y, s=26, color="#3b6ea5", edgecolor="k",
-                       linewidth=0.3, zorder=3)
+            ax.scatter(x, y, s=16, color="#3b6ea5", edgecolor="k",
+                       linewidth=0.25, zorder=3)
             if len(x) >= 3 and x.nunique() >= 2 and y.nunique() >= 2:
                 r, p = spearmanr(x, y)
                 b, a = np.polyfit(x.astype(float), y.astype(float), 1)
                 xs = np.linspace(x.min(), x.max(), 30)
                 ax.plot(xs, a + b * xs, color="#c1443c", lw=1.1, zorder=2)
-                ax.set_title(f"rho={r:+.2f}, p={p:.3f}", fontsize=7,
-                             color="#b00" if p < 0.05 else "black")
+                ax.set_title(f"{r:+.2f} (p={p:.3f})", fontsize=6.5,
+                             color="#b00" if p < 0.05 else "black", pad=2)
             ax.grid(alpha=0.22, zorder=0)
-            ax.tick_params(labelsize=6)
+            ax.tick_params(labelsize=5.5)
             if j == 0:
-                ax.set_ylabel(feat, fontsize=7)
+                ax.set_ylabel(feat, fontsize=6.5)
             if i == nrow - 1:
-                ax.set_xlabel(cond, fontsize=8)
+                ax.set_xlabel(cond, fontsize=7.5)
+    pg = f"   page {page}/{n_pages}" if n_pages > 1 else ""
     fig.suptitle(f"{args.family.upper()}: features vs conditions at "
-                 f"SoH = {args.target_soh}  ({len(df)} cells)", fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.985))
-    png = dest / f"{args.family}_features_vs_conditions_soh{soh_tag(args.target_soh)}.png"
+                 f"SoH = {args.target_soh}  ({len(df)} cells){pg}", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    png = dest / (f"{args.family}_features_vs_conditions_"
+                  f"soh{soh_tag(args.target_soh)}{suffix}.png")
     fig.savefig(png, dpi=130)
     plt.close(fig)
     print(f"[OK] {png}")
@@ -165,6 +181,9 @@ def main():
                          f"(default: {DEFAULT_FEATURE})")
     ap.add_argument("--all-features", action="store_true",
                     help="use every numeric feature in the table")
+    ap.add_argument("--per-page", type=int, default=8,
+                    help="features per scatter-grid figure (default 8); the grid is "
+                         "split across several files rather than one huge canvas")
     ap.add_argument("--heatmap", action="store_true",
                     help="also write a Spearman rho heatmap over feature x condition")
     ap.add_argument("--target-soh", type=float, default=0.995)

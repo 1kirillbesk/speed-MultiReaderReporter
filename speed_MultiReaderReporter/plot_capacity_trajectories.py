@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import matplotlib
@@ -50,6 +51,7 @@ PRESETS = {
         "cap_label": "OCV C/10 discharge capacity [Ah]",
         "cond_csv": "condition_overview_homocomp_jgne.csv",
         "group_by": "pause_h",
+        "prefer_col": "pause_h",
         "thr_source": "pipeline",      # throughput_cum column, in A.s
         "thr_exclude": None,
     },
@@ -60,19 +62,82 @@ PRESETS = {
         "cap_label": "C/2 discharge capacity [Ah]",
         "cond_csv": "condition_overview_SPEED_LWHK.csv",
         "group_by": "fec",
+        "prefer_col": "fec",
         "thr_source": "report",        # summed from <cell>/cycling/report.csv
         "thr_exclude": "rul_eka_CU",   # count cycling only, not the checkup itself
     },
+    "bald": {
+        "subdir": "cell_feature",
+        "pattern": "BALD_35E_*",
+        "cap_col": "cap_ocv_dis",
+        "cap_label": "OCV C/10 discharge capacity [Ah]",
+        "cond_csv": "condition_overview_BALD_35E.csv",
+        "group_by": "c_rate",
+        "prefer_col": "c_rate",
+        "thr_source": "pipeline",
+        "thr_exclude": None,
+    },
+    "bald_temp": {
+        "subdir": "cell_feature",
+        "pattern": "*",
+        "cap_col": "cap_ocv_dis",
+        "cap_label": "OCV charge capacity [Ah]",
+        "cond_csv": "condition_overview_BALD.csv",
+        "group_by": "temp_C",
+        "prefer_col": "soc_start",
+        "thr_source": "pipeline",
+        "thr_exclude": None,
+    },
+    "bald_c2": {
+        "subdir": "cell_feature",
+        "pattern": "BALD_35E_*",
+        "cap_col": "cap_dis",
+        "cap_label": "C/2 discharge capacity [Ah]",
+        "cond_csv": "condition_overview_BALD_35E.csv",
+        "group_by": "c_rate",
+        "prefer_col": "c_rate",
+        "thr_source": "pipeline",
+        "thr_exclude": None,
+    },
 }
 
-def load_conditions(out_dir: Path, cond_csv: str) -> pd.DataFrame:
+def load_conditions(out_dir: Path, cond_csv: str,
+                    prefer_col: str | None = None) -> pd.DataFrame:
+    """One condition row per cell.
+
+    A cell normally has several labels - the cycling programme AND the checkup
+    (rul_SAM_CU_varCapa etc.). Ranking purely by n_files picks the CHECKUP,
+    because there are far more checkup files, which silently discards the
+    cycling condition: for BALD that reported dyn on 2 cells instead of 21.
+
+    So: scalar conditions come from the preferred row (one carrying `prefer_col`,
+    e.g. c_rate, which only cycling labels have), and 0/1 FLAG columns are OR-ed
+    across every label the cell ever ran - "this cell ever ran a dyn programme".
+    """
     path = out_dir / cond_csv
     if not path.exists():
         print(f"[WARN] {path} not found; cells will not be grouped")
         return pd.DataFrame(columns=["cell"])
     c = pd.read_csv(path)
-    return (c.sort_values("n_files", ascending=False)
-             .drop_duplicates(subset="cell", keep="first"))
+
+    c = c.copy()
+    c["_pref"] = (c[prefer_col].notna().astype(int)
+                  if prefer_col and prefer_col in c.columns else 0)
+    chosen = (c.sort_values(["_pref", "n_files"], ascending=[False, False])
+                .drop_duplicates(subset="cell", keep="first")
+                .drop(columns="_pref"))
+
+    flag_cols = [col for col in c.columns
+                 if col not in ("cell", "label", "n_files", "first_test",
+                                "last_test", "_pref")
+                 and pd.api.types.is_numeric_dtype(c[col])
+                 and set(pd.unique(c[col].dropna())) <= {0, 1}]
+    if flag_cols:
+        any_flag = c.groupby("cell")[flag_cols].max()
+        chosen = chosen.set_index("cell")
+        chosen[flag_cols] = any_flag.reindex(chosen.index)[flag_cols]
+        chosen = chosen.reset_index()
+    return chosen
 
 
 def throughput_ah(out_dir: Path, cell: str, times: pd.Series, cfg: dict,
@@ -114,6 +179,36 @@ def throughput_ah(out_dir: Path, cell: str, times: pd.Series, cfg: dict,
         out.append(float(prior.max()) if len(prior) else 0.0)
     return np.asarray(out, dtype=float)
 
+
+def category_of(cond: pd.DataFrame, cols: list[str]) -> dict:
+    """cell -> category string built from several condition columns.
+
+    A 0/1 flag contributes its NAME when set ("dyn", "sdod"); anything else
+    contributes "col=value" ("c_rate=0.25"). Cells with nothing set are "plain".
+    Lets one axis of the plot encode a combination rather than a single column.
+    """
+    out = {}
+    use = [c for c in cols if c in cond.columns]
+    for c in cols:
+        if c not in cond.columns:
+            print(f"[WARN] no condition column {c!r}; ignored")
+    if not use:
+        return out
+    for _, row in cond.iterrows():
+        parts = []
+        for c in use:
+            v = pd.to_numeric(pd.Series([row[c]]), errors="coerce").iloc[0]
+            if pd.isna(v):
+                continue
+            binary = set(pd.unique(pd.to_numeric(cond[c], errors="coerce").dropna())) <= {0, 1}
+            if binary:
+                if v != 0:
+                    parts.append(c)
+            else:
+                parts.append(f"{c}={v:g}")
+        out[row["cell"]] = "+".join(parts) if parts else "plain"
+    return out
+
 def cell_trajectory(path: Path, cap_col: str) -> pd.DataFrame | None:
     df = pd.read_csv(path, usecols=lambda c: c in (cap_col, "CU_time", "throughput_cum"))
     if cap_col not in df.columns or "CU_time" not in df.columns or df.empty:
@@ -135,14 +230,23 @@ def draw_facets(family: str, args, dest: Path, trajectories, cond, cfg):
     masquerade as a rest effect.
     """
     facet_by, group_by = args.facet_by, (args.group_by or cfg["group_by"])
-    if facet_by not in cond.columns or group_by not in cond.columns:
-        print(f"[WARN] need both {facet_by!r} and {group_by!r} in the condition table")
-        return
-    fmap = dict(zip(cond["cell"], pd.to_numeric(cond[facet_by], errors="coerce")))
-    gmap = dict(zip(cond["cell"], pd.to_numeric(cond[group_by], errors="coerce")))
+    if "," in facet_by:
+        fmap = category_of(cond, [c.strip() for c in facet_by.split(",")])
+        facet_by = facet_by.replace(",", "+")
+    elif facet_by in cond.columns:
+        fmap = dict(zip(cond["cell"], pd.to_numeric(cond[facet_by], errors="coerce")))
+    else:
+        print(f"[WARN] no condition column {facet_by!r}"); return
+    if "," in group_by:
+        gmap = category_of(cond, [c.strip() for c in group_by.split(",")])
+        group_by = group_by.replace(",", "+")
+    elif group_by in cond.columns:
+        gmap = dict(zip(cond["cell"], pd.to_numeric(cond[group_by], errors="coerce")))
+    else:
+        print(f"[WARN] no condition column {group_by!r}"); return
 
     items = [(c, tr, fmap.get(c, np.nan), gmap.get(c, np.nan)) for c, tr, _ in trajectories]
-    facets = sorted({f for _, _, f, _ in items if pd.notna(f)})
+    facets = sorted({f for _, _, f, _ in items if pd.notna(f)}, key=str)
     if not facets:
         print(f"[WARN] no usable {facet_by} levels")
         return
@@ -162,7 +266,7 @@ def draw_facets(family: str, args, dest: Path, trajectories, cond, cfg):
             col = colour.get(g, "0.6")
             lab = None
             if pd.notna(g) and g not in seen:
-                lab = f"{group_by} = {g:g}"
+                lab = f"{group_by} = {g:g}" if isinstance(g, (int, float)) else str(g)
                 seen.add(g)
             axes[0][j].plot(tr["weeks"], tr["SOH"], marker="o", ms=4, lw=1.4,
                             color=col, label=lab)
@@ -173,7 +277,8 @@ def draw_facets(family: str, args, dest: Path, trajectories, cond, cfg):
                                 (tr["weeks"].iloc[-1], tr["SOH"].iloc[-1]),
                                 fontsize=7, xytext=(3, 0), textcoords="offset points")
         n = sum(1 for _, _, f, _ in items if pd.notna(f) and f == fv)
-        axes[0][j].set_title(f"{facet_by} = {fv:g}   ({n} cells)", fontsize=10)
+        lab_fv = f"{fv:g}" if isinstance(fv, (int, float)) else str(fv)
+        axes[0][j].set_title(f"{lab_fv}   ({n} cells)", fontsize=10)
         axes[0][j].set_xlabel("weeks since first checkup")
         axes[1][j].set_xlabel("cumulative cycling throughput [Ah]")
         for ax in (axes[0][j], axes[1][j]):
@@ -186,7 +291,9 @@ def draw_facets(family: str, args, dest: Path, trajectories, cond, cfg):
     fig.suptitle(f"{family.upper()}: effect of {group_by} within each {facet_by}",
                  fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    png = dest / f"{family}_capacity_by_{facet_by}_{group_by}.png"
+    import re as _re
+    png = dest / _re.sub(r"[^A-Za-z0-9_.]+", "_",
+                         f"{family}_capacity_by_{facet_by}_{group_by}.png")
     fig.savefig(png, dpi=140)
     plt.close(fig)
     print(f"[OK] {png}")
@@ -202,30 +309,83 @@ def draw_family(family: str, args, dest: Path):
     if args.only:
         only = {s.strip() for s in args.only.split(",") if s.strip()}
 
-    cond = load_conditions(args.out_dir, cfg["cond_csv"])
+    cond = load_conditions(args.out_dir, cfg["cond_csv"], cfg.get("prefer_col"))
     group_by = args.group_by or cfg["group_by"]
+    categorical = "," in group_by
     gmap = {}
-    if group_by in cond.columns:
+    if categorical:
+        gmap = category_of(cond, [c.strip() for c in group_by.split(",")])
+        group_by = group_by.replace(",", "/")
+    elif group_by in cond.columns:
         gmap = dict(zip(cond["cell"], pd.to_numeric(cond[group_by], errors="coerce")))
+    # '/' reads fine in a legend label but is a path separator in a filename
+    gtag = re.sub(r"[^A-Za-z0-9]+", "_", group_by).strip("_")
 
-    trajectories = []
+    def _flags(cols):
+        """cell -> True if any of `cols` is truthy for that cell."""
+        out = {}
+        for col in cols:
+            if col not in cond.columns:
+                print(f"[WARN] no condition column {col!r}; ignored")
+                continue
+            v = pd.to_numeric(cond[col], errors="coerce").fillna(0) != 0
+            for cell, hit in zip(cond["cell"], v):
+                out[cell] = out.get(cell, False) or bool(hit)
+        return out
+
+    excl = _flags([c.strip() for c in args.exclude.split(",")]) if args.exclude else {}
+    keep = _flags([c.strip() for c in args.only_flag.split(",")]) if args.only_flag else None
+    # Category per cell from which flags are set: "plain", "dyn", "dyn+sdod", ...
+    style_cols, cat_of = [], {}
+    if args.style_by:
+        style_cols = [c.strip() for c in args.style_by.split(",")
+                      if c.strip() in cond.columns]
+        missing = [c.strip() for c in args.style_by.split(",") if c.strip() not in cond.columns]
+        for c in missing:
+            print(f"[WARN] no condition column {c!r}; ignored")
+        if style_cols:
+            cat_of = category_of(cond, style_cols)
+
+    trajectories, dropped = [], []
     for path in sorted(folder.glob(f"{cfg['pattern']}.csv")):
         if only and not any(path.stem.endswith(f"_{o}") or o == path.stem for o in only):
             continue
+        if excl.get(path.stem, False):
+            dropped.append(path.stem); continue
+        if keep is not None and not keep.get(path.stem, False):
+            dropped.append(path.stem); continue
         tr = cell_trajectory(path, cfg["cap_col"])
         if tr is None or len(tr) < 1:
             continue
         thr = throughput_ah(args.out_dir, path.stem, tr["t"], cfg, tr)
         tr["throughput_Ah"] = thr if thr is not None else np.nan
+        tr.attrs["cat"] = cat_of.get(path.stem, "plain")
         trajectories.append((path.stem, tr, gmap.get(path.stem, np.nan)))
+
+    if dropped:
+        print(f"[filter] {len(dropped)} cell(s) excluded: "
+              f"{', '.join(c.split('_')[-1] for c in dropped)}")
 
     if not trajectories:
         print(f"[INFO] no usable cells for {family}")
         return
 
-    levels = sorted({g for _, _, g in trajectories if pd.notna(g)})
-    cmap = plt.get_cmap("viridis")
-    colour = {lv: cmap(i / max(1, len(levels) - 1)) for i, lv in enumerate(levels)}
+    levels = sorted({g for _, _, g in trajectories if pd.notna(g)},
+                    key=lambda v: (v != "plain", v) if categorical else v)
+    if categorical:
+        base = list(plt.get_cmap("tab10").colors) + list(plt.get_cmap("Set2").colors)
+        colour = {lv: base[i % len(base)] for i, lv in enumerate(levels)}
+    else:
+        cmap = plt.get_cmap("viridis")
+        colour = {lv: cmap(i / max(1, len(levels) - 1)) for i, lv in enumerate(levels)}
+
+    # line style + marker per flag combination; "plain" always solid circles
+    STYLES = [("-", "o"), ("--", "s"), (":", "^"), ("-.", "D"),
+              ((0, (3, 1, 1, 1)), "v"), ((0, (5, 1)), "P"), ((0, (1, 1)), "X"),
+              ((0, (3, 2, 1, 2, 1, 2)), "*")]
+    cats = sorted({tr.attrs.get("cat", "plain") for _, tr, _ in trajectories},
+                  key=lambda c: (c != "plain", c))
+    style_map = {c: STYLES[i % len(STYLES)] for i, c in enumerate(cats)}
 
     fig, axes = plt.subplots(1, 3, figsize=(19.5, 5.2))
     seen = set()
@@ -233,17 +393,21 @@ def draw_family(family: str, args, dest: Path):
         col = colour.get(g, "0.6")
         lab = None
         if pd.notna(g) and g not in seen:
-            lab = f"{group_by} = {g:g}"
+            n_g = sum(1 for _, _, gg in trajectories if gg == g)
+            lab = (f"{g}  (n={n_g})" if categorical else f"{group_by} = {g:g}")
             seen.add(g)
         elif pd.isna(g) and "na" not in seen:
             lab = f"{group_by} n/a"
             seen.add("na")
+        cat = tr.attrs.get("cat", "plain")
+        ls, mk = style_map.get(cat, ("-", "o"))
+        kw = dict(marker=mk, ms=3.5, lw=1.2, color=col, alpha=0.85, ls=ls)
+        if cat != "plain":
+            kw.update(mfc="none", lw=1.4)
         for ax, ycol in ((axes[0], cfg["cap_col"]), (axes[1], "SOH")):
-            ax.plot(tr["weeks"], tr[ycol], marker="o", ms=3.5, lw=1.2,
-                    color=col, alpha=0.85, label=lab if ax is axes[0] else None)
+            ax.plot(tr["weeks"], tr[ycol], label=lab if ax is axes[0] else None, **kw)
         if tr["throughput_Ah"].notna().any():
-            axes[2].plot(tr["throughput_Ah"], tr["SOH"], marker="o", ms=3.5,
-                         lw=1.2, color=col, alpha=0.85)
+            axes[2].plot(tr["throughput_Ah"], tr["SOH"], **kw)
         if args.label_cells:
             axes[1].annotate(cell.split("_")[-1],
                              (tr["weeks"].iloc[-1], tr["SOH"].iloc[-1]),
@@ -262,17 +426,35 @@ def draw_family(family: str, args, dest: Path):
     for ax in axes:
         ax.grid(alpha=0.25)
     if levels or seen:
-        axes[0].legend(fontsize=8, ncol=2)
+        first = axes[0].legend(fontsize=8, ncol=2, loc="upper right")
+    if len(style_map) > 1:
+        from matplotlib.lines import Line2D
+        n_by_cat = {}
+        for _, tr, _ in trajectories:
+            c = tr.attrs.get("cat", "plain")
+            n_by_cat[c] = n_by_cat.get(c, 0) + 1
+        handles = [Line2D([], [], color="0.25", ls=style_map[c][0],
+                          marker=style_map[c][1], ms=5,
+                          mfc="none" if c != "plain" else "0.25",
+                          label=f"{c}  (n={n_by_cat.get(c, 0)})")
+                   for c in cats]
+        axes[1].legend(handles=handles, fontsize=8, title="programme variant",
+                       title_fontsize=8, loc="lower left")
 
     n_pts = sum(len(tr) for _, tr, _ in trajectories)
+    extra = ""
+    if style_cols:
+        extra = f"   (line style = {'/'.join(style_cols)})"
+    if args.exclude:
+        extra += f"   [excluded: {args.exclude}]"
     fig.suptitle(f"{family.upper()}: {cfg['cap_label'].split(' [')[0]} "
-                 f"- {len(trajectories)} cells, {n_pts} checkups", fontsize=12)
+                 f"- {len(trajectories)} cells, {n_pts} checkups{extra}", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
 
     if args.facet_by:
         draw_facets(family, args, dest, trajectories, cond, cfg)
 
-    png = dest / f"{family}_capacity_trajectory_{group_by}.png"
+    png = dest / f"{family}_capacity_trajectory_{gtag}.png"
     fig.savefig(png, dpi=140)
     plt.close(fig)
     print(f"[OK] {png}")
@@ -283,7 +465,7 @@ def draw_family(family: str, args, dest: Path):
          "soh_last": tr["SOH"].iloc[-1],
          "throughput_Ah_last": tr["throughput_Ah"].iloc[-1], group_by: g}
         for c, tr, g in trajectories])
-    csv = dest / f"{family}_capacity_trajectory_{group_by}.csv"
+    csv = dest / f"{family}_capacity_trajectory_{gtag}.csv"
     summary.to_csv(csv, index=False)
     print(f"[OK] {csv}")
     print(summary.to_string(index=False))
@@ -291,10 +473,22 @@ def draw_family(family: str, args, dest: Path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--family", choices=["jgne", "lwhk_c2", "both"], default="both")
+    ap.add_argument("--family",
+                    choices=["jgne", "lwhk_c2", "bald", "bald_c2", "bald_temp", "both"],
+                    default="both")
     ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     ap.add_argument("--dest", type=Path, default=None,
                     help=f"output folder (default: <out-dir>/{DEFAULT_SUBFOLDER})")
+    ap.add_argument("--exclude", default=None,
+                    help="comma separated flag columns; cells where any is truthy are "
+                         "DROPPED, e.g. --exclude dyn,scur,sdod,ssoc")
+    ap.add_argument("--only-flag", default=None,
+                    help="comma separated flag columns; keep ONLY cells where any is "
+                         "truthy (inverse of --exclude)")
+    ap.add_argument("--style-by", default=None,
+                    help="comma separated flag columns; each COMBINATION gets its own "
+                         "line style + marker so the variants are distinguishable "
+                         "without removing them, e.g. --style-by dyn,sdod,scur")
     ap.add_argument("--facet-by", default=None,
                     help="condition to split into separate panels, e.g. fec; "
                          "cells inside a panel are coloured by --group-by")

@@ -114,6 +114,18 @@ def build_table(raw_dir: Path, contains: str, feature_dir: Path | None,
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
+
+    # Derived from the SOC window, for every family that parses one:
+    #   soc_mean  the "true" SOC the cell sits at   = (start + end) / 2
+    #   soc_dod   the depth of discharge swung      = |end - start|
+    # NOTE: soc_dod is NOT the same as the `dod` column, which some BALD labels
+    # carry explicitly (e.g. _20h40dod). Kept separate on purpose.
+    if {"soc_start", "soc_end"} <= set(df.columns):
+        a = pd.to_numeric(df["soc_start"], errors="coerce")
+        b = pd.to_numeric(df["soc_end"], errors="coerce")
+        df["soc_mean"] = (a + b) / 2
+        df["soc_dod"] = (b - a).abs()
+
     cond_cols = [c for c in df.columns if c not in ("cell", "label", "test_date")]
 
     grouped = (

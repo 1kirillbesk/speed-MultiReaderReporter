@@ -1,6 +1,7 @@
 # speed_MultiReaderReporter/core/pipeline.py
 from __future__ import annotations
 from collections import defaultdict, Counter
+import os
 from pathlib import Path
 import logging
 import pandas as pd
@@ -15,7 +16,10 @@ from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
 import re
 
-log_path = Path('E:/download/jgne/out_jgne') / "errors.log"
+# SPEED_LOG_DIR lets a different dataset (BALD, ...) keep its own errors.log
+log_dir = Path(os.environ.get('SPEED_LOG_DIR', 'E:/download/jgne/out_jgne'))
+log_dir.mkdir(parents=True, exist_ok=True)
+log_path = log_dir / "errors.log"
 #C:/Users/Public/Documents/takedata/Speed/out_lw
 logging.basicConfig(
     filename=str(log_path),
@@ -173,7 +177,13 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
 
                         ocv_features = extract_features(df_chk, cell, cfg)
 
-                        df_filtered = df_chk[df_chk["procedure"] == "rul_Pulse"].reset_index(drop=True)
+                        pulse_proc = str(cfg.get("classification", {})
+                                         .get("pulse_procedure", "rul_Pulse"))
+                        # substring, not equality: the procedure is named
+                        # rul_Pulse for JGNE/LWHK but rul_Pulse_SAM for BALD
+                        df_filtered = df_chk[df_chk["procedure"].astype(str)
+                                             .str.contains(pulse_proc, case=False, na=False)
+                                             ].reset_index(drop=True)
                         # df_filtered = (
                         #     df_chk
                         #     .loc[df_chk.index[df_chk["step_int"] == 26].max() + 1:]

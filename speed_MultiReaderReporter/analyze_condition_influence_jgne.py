@@ -42,7 +42,7 @@ ARRAY_COLS = {"Vcha", "dQdVcha", "Q_intVcha",
               "peakV_max_dis", "peakICA_max_dis", "peakQ_max_dis", "peakDVA_max_dis",
               "peakV_min_dis", "peakICA_min_dis", "peakQ_min_dis", "peakDVA_min_dis"}
 
-JGNE_CONDITIONS = ["soc_start", "soc_end", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"]
+JGNE_CONDITIONS = ["soc_start", "soc_end", "soc_mean", "soc_dod", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"]
 
 # ---------------------------------------------------------------- shared core
 
@@ -138,10 +138,24 @@ def join_conditions(features: pd.DataFrame, cond_csv: Path,
     cond = cond.copy()
     cond["_pref"] = (cond[prefer_col].notna().astype(int)
                      if prefer_col and prefer_col in cond.columns else 0)
-    cond = (cond.sort_values(["_pref", "n_files"], ascending=[False, False])
-                .drop_duplicates(subset="cell", keep="first")
-                .drop(columns="_pref"))
-    return features.merge(cond, on="cell", how="left", suffixes=("", "_cond"))
+    chosen = (cond.sort_values(["_pref", "n_files"], ascending=[False, False])
+                  .drop_duplicates(subset="cell", keep="first")
+                  .drop(columns="_pref"))
+
+    # A cell usually runs several programmes. Scalar conditions come from the
+    # preferred row above, but 0/1 flags must be OR-ed over ALL of its labels -
+    # taking them from one row reported dyn on 2 BALD cells instead of 21.
+    flag_cols = [c for c in cond.columns
+                 if c not in ("cell", "label", "n_files", "first_test",
+                              "last_test", "_pref")
+                 and pd.api.types.is_numeric_dtype(cond[c])
+                 and set(pd.unique(cond[c].dropna())) <= {0, 1}]
+    if flag_cols:
+        any_flag = cond.groupby("cell")[flag_cols].max()
+        chosen = chosen.set_index("cell")
+        chosen[flag_cols] = any_flag.reindex(chosen.index)[flag_cols]
+        chosen = chosen.reset_index()
+    return features.merge(chosen, on="cell", how="left", suffixes=("", "_cond"))
 
 def condition_influence(df: pd.DataFrame, conditions: list[str],
                         features: list[str]) -> pd.DataFrame:

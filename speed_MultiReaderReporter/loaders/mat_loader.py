@@ -61,6 +61,22 @@ def infer_cell_from_path(path: Path) -> str:
     """Public helper to infer the cell id from a MAT path."""
     return _cell_from_path(path)
 
+# Extra diga.daten fields -> canonical column names, matching csvzip_loader so a
+# .mat run produces the same schema as a .csv one. Without qstep/procedure/T1 the
+# feature extraction cannot run at all (extract_features masks on "procedure" and
+# reads capacity from "qstep"). The MAT files carry all of them; only the mapping
+# was missing. Note the cell temperature is called Temp here, T1 in the CSVs.
+_EXTRA_FIELDS = {
+    "procedure": "Prozedur",
+    "qcha": "AhLad",
+    "qdis": "AhEla",
+    "qstep": "AhStep",
+    "T1": "Temp",
+    "T2": "T2",
+    "Tenv": "Tenv",
+    "CNom": "CNom",
+}
+
 # ---- normalize to canonical dataframe ----
 def _df_from_mat(path: Path) -> pd.DataFrame:
     a = _try_fast_diga_arrays(path)
@@ -94,6 +110,19 @@ def _df_from_mat(path: Path) -> pd.DataFrame:
             # make length agree and convert to str series
             if len(zst) == len(df):
                 df["state"] = pd.Series(zst).astype(str)
+
+        for col, field in _EXTRA_FIELDS.items():
+            raw = _get_field(daten, field) if daten is not None else None
+            if raw is None:
+                continue
+            arr = np.asarray(raw).ravel()
+            if len(arr) != len(df):
+                continue
+            if col == "procedure":
+                ser = pd.Series(arr).astype(str).str.strip()
+                df[col] = ser.replace({"nan": "", "None": ""})
+            else:
+                df[col] = pd.to_numeric(pd.Series(arr), errors="coerce")
     except Exception:
         pass
 
@@ -103,10 +132,22 @@ def _df_from_mat(path: Path) -> pd.DataFrame:
 # ---- public loader ----
 def load(path: Path, cfg: dict, out_root: Path) -> list[RunRecord]:
     df = _df_from_mat(path)
-    return [RunRecord(
-        cell=_cell_from_path(path),
-        program=_program_from_path(path),
-        df=df,
-        source_path=path,
-        loader="mat",
-    )]
+    cell, program = _cell_from_path(path), _program_from_path(path)
+
+    # Reuse the csv loader's splitter so a file holding both the cycling
+    # programme and an embedded RPT yields one RunRecord per procedure, which is
+    # what split_total_list/extract_features expect.
+    if "procedure" in df.columns and df["procedure"].astype(str).str.strip().ne("").any():
+        try:
+            from loaders.csvzip_loader import _segment_by_procedure
+        except ImportError:
+            from .csvzip_loader import _segment_by_procedure
+        try:
+            recs = _segment_by_procedure(df, cell, program, path, "mat", cfg)
+            if recs:
+                return recs
+        except Exception:
+            pass
+
+    return [RunRecord(cell=cell, program=program, df=df,
+                      source_path=path, loader="mat")]

@@ -34,8 +34,10 @@ import pandas as pd
 DEFAULT_OUT_DIR = Path("E:/download/jgne/out_jgne")
 
 FAMILY_CONDITIONS = {
-    "jgne": ["soc_start", "soc_end", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"],
+    "jgne": ["soc_start", "soc_end", "soc_mean", "soc_dod", "pause_h", "has_pulse", "low_soc", "temp_C", "c_rate_chg", "c_rate_dchg"],
     "lwhk": ["fec", "rest_min", "ref"],
+    "bald": ["soc_start", "soc_end", "soc_mean", "soc_dod", "c_rate", "temp_C", "dyn", "sdod", "scur",
+             "pau", "short", "pulsecyc", "pause_h", "dod", "n_cyc"],
 }
 
 # Bookkeeping columns in the features_at_soh table that are not model targets.
