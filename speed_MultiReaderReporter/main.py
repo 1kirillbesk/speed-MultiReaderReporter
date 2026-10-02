@@ -1,6 +1,7 @@
 # speed_MultiReaderReporter/main.py
 from __future__ import annotations
 from pathlib import Path
+import argparse
 import json
 import sys
 import yaml
@@ -113,12 +114,31 @@ def should_process_cell(cell_id: str,
 def update_manifest_for_cell(manifest: dict, cell_id: str, items: list[DetectedItem]) -> None:
     manifest.setdefault("cells", {})[cell_id] = {"inputs": build_item_manifest(items)}
 
+DEFAULT_CONFIG = "config_samsung35e.yaml"
+
 def main():
     # ---------- config ----------
     here = Path(__file__).resolve().parent
-    cfg = load_config(here / "config_bald_homocomp.yaml")
 
-    in_path = Path(cfg["input"]["path"]).resolve()
+    # `--config NAME` selects the dataset without editing this file. NAME may be a
+    # bare filename next to main.py or a full path.
+    ap = argparse.ArgumentParser(description="Run the reporting pipeline for one dataset.")
+    ap.add_argument("--config", "-c", default=DEFAULT_CONFIG,
+                    help=f"config yaml, relative to this file or absolute "
+                         f"(default: {DEFAULT_CONFIG})")
+    args = ap.parse_args()
+    cfg_path = Path(args.config)
+    if not cfg_path.is_absolute():
+        cfg_path = here / cfg_path
+    if not cfg_path.exists():
+        print(f"[ERROR] config not found: {cfg_path}")
+        sys.exit(2)
+    cfg = load_config(cfg_path)
+
+    # input.path may be a single folder or a list of folders, so several raw
+    # directories can feed one output root.
+    raw = cfg["input"]["path"]
+    in_paths = [Path(p).resolve() for p in (raw if isinstance(raw, (list, tuple)) else [raw])]
     recurse = bool(cfg["input"].get("recurse", True))
     out_root = Path(cfg["output"]["root"]).resolve()
     out_root.mkdir(parents=True, exist_ok=True)
@@ -128,12 +148,20 @@ def main():
     manifest_dirty = False
 
     if verbose:
-        print(f"[cfg] input={in_path} (recurse={recurse})")
+        print(f"[cfg] file={cfg_path.name}")
+        for p in in_paths:
+            print(f"[cfg] input={p} (recurse={recurse})")
         print(f"[cfg] output={out_root}")
         print(f"[cfg] cache mode={cache_mode}")
 
     # ---------- discover ----------
-    detected = discover_inputs(in_path, recurse=recurse)
+    detected = []
+    for p in in_paths:
+        if not p.exists():
+            print(f"[WARN] input folder does not exist, skipped: {p}")
+            continue
+        detected.extend(discover_inputs(p, recurse=recurse))
+    in_path = in_paths[0]
     name_contains = cfg.get("input", {}).get("name_contains", [])
     needles = [n.lower() for n in name_contains]
     if needles:

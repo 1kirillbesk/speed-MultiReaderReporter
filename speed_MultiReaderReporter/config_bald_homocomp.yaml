@@ -1,0 +1,140 @@
+# speed_MultiReaderReporter/config_bald_homocomp.yaml
+#
+# BALD homocomp_SAM sub-study: the 40 degC vs 25 degC temperature comparison.
+#
+# Reads raw_data_MAT, not raw_data_csv. The 40 degC cells (656-664) exist ONLY as
+# .mat - there is no csv for them - while the 25 degC counterparts exist as both,
+# so the mat folder is the only place both arms are available together.
+#
+# Structure is the JGNE pattern, not the inhomoSAM one: the checkup
+# rul_SAM_RPT_0C07 sits beside the rul_homocomp_SAM_* cycling inside the same
+# file, so the RPT segment must be paired with the preceding cycling segment.
+#     step  2 -> capa_cha   +1.509 A
+#     step  6 -> ocv_dis    -0.203 A (~C/17), ~52k points
+#     step  9 -> ocv_cha    +0.203 A
+#     step 12 -> capa_dis   -1.512 A, inside the homocomp procedure
+#
+# cell_name_contain is deliberately limited to the CONDITION-MATCHED cells:
+#     10SOC70_10h     25C: SPEED_BALD_005/006   40C: BALD_35E_658/659
+#     40SOC100_10h    25C: SPEED_BALD_015/016   40C: BALD_35E_663/664
+#     40SOC100_80h    25C: SPEED_BALD_013/014   40C: BALD_35E_660/661
+# Everything else differs in more than temperature and would not be a controlled
+# comparison.
+
+input:
+  path: "E:/download/BALD/raw_data_mat"
+  recurse: true
+  name_contains: []
+  cell_name_contain:
+    - "SPEED_BALD_005"
+    - "SPEED_BALD_006"
+    - "SPEED_BALD_013"
+    - "SPEED_BALD_014"
+    - "SPEED_BALD_015"
+    - "SPEED_BALD_016"
+    - "BALD_35E_658"
+    - "BALD_35E_659"
+    - "BALD_35E_660"
+    - "BALD_35E_661"
+    - "BALD_35E_663"
+    - "BALD_35E_664"
+
+output:
+  root: "E:/download/BALD/out_bald_homocomp"
+
+reports:
+  format: "csv"
+  mat_variable: "report"
+
+classification:
+  cycling_keywords: ["homocomp_sam"]
+  checkup_keywords: ["sam_rpt"]
+  duration_threshold_minutes: 60
+  rpt_keywords: ["sam_rpt"]
+  cu_keyword: ["sam_rpt"]
+  pulse_procedure: "rul_Pulse_SAM"
+
+procedures:
+  rpt: "sam_rpt"      # rul_SAM_RPT_0C07 - OCV sweeps + capacity charge
+  cyc: "homocomp"     # rul_homocomp_SAM_* - capacity discharge
+
+families:
+  # Two RPT variants exist and their step numbering differs, so the arms need
+  # separate maps. BOTH are set to read the OCV CHARGE sweep (ocv_dis pointed at
+  # the same step as ocv_cha), because rul_SAM_RPT_0C07_2 - used by the 40 degC
+  # cells for 10 of their 11 checkups - contains NO OCV discharge at all. Using
+  # the charge sweep on both sides keeps the comparison like-for-like; the
+  # resulting cap_ocv_dis is an OCV-CHARGE capacity, not a discharge one.
+  - name: homocomp_sam_25
+    match: ["SPEED_BALD"]
+    procedures: {rpt: "sam_rpt", cyc: "homocomp"}
+    classification:
+      rpt_keywords: ["sam_rpt"]
+      cu_keyword: ["sam_rpt"]
+      split_label_keyword: "homocomp"
+      pair_rpt_with_previous: true
+      checkup_required_step: 34
+      pulse_procedure: "rul_Pulse_SAM"
+    voltage: {high: 4.2, highm: 3.9, lowm: 3.6, low: 2.65}
+    CU_steps:                 # rul_SAM_RPT_0C07
+      ocv_cha: 9              # +0.203 A OCV charge
+      ocv_dis: 9              # same sweep - see note above
+      capa_cha: 2
+      capa_dis: 12            # in the homocomp procedure
+
+  - name: homocomp_sam_40
+    match: ["BALD_35E_65", "BALD_35E_66"]
+    procedures: {rpt: "sam_rpt", cyc: "homocomp"}
+    classification:
+      rpt_keywords: ["sam_rpt"]
+      cu_keyword: ["sam_rpt"]
+      split_label_keyword: "homocomp"
+      pair_rpt_with_previous: true
+      checkup_required_step: null    # the _2 cycling segment has no step 34
+      pulse_procedure: "rul_Pulse_SAM"
+    voltage: {high: 4.2, highm: 3.9, lowm: 3.6, low: 2.65}
+    CU_steps:                 # rul_SAM_RPT_0C07_2
+      ocv_cha: 10             # +0.209 A OCV charge (step 9 here is a -5 A pulse)
+      ocv_dis: 10             # no OCV discharge exists in this variant
+      capa_cha: 13            # in the homocomp procedure
+      capa_dis: 17            # -1.699 A, 3.157 Ah
+
+soh:
+  min_step_required: 20
+  i_thresh_A: 0.0
+  eod_v_cut_V: null
+  export_data: true
+  include_rpt: true
+  rpt_min_step_required: null
+  rpt_trailing_step_id: null
+  rpt_require_trailing_step: false
+
+legend:
+  ncol: 4
+
+voltage:
+  high: 4.2
+  highm: 3.9
+  lowm: 3.6
+  low: 2.65
+
+CU_steps:
+  ocv_cha: [9, 9]
+  ocv_dis: [6, 6]
+  capa_cha: [2, 2]
+  capa_dis: [12, 12]
+
+logging:
+  verbose: true
+
+cache:
+  existing_cell_mode: "summary_only"
+
+checkup_grouping:
+  mode: "both"
+  enabled: false
+  plot_segments: false
+  pause_label: "PAU"
+  min_points: 5
+  require_step_change: true
+  plot_max_points_per_segment: 5000

@@ -169,7 +169,15 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             for df_chk, lbl_chk in checkup_list:
                 try:
                     label_lower = lbl_chk.lower()
-                    if "cu" in label_lower or "rpt" in label_lower:
+                    # Which checkup labels are worth extracting features from.
+                    # Defaults to the historical ("cu", "rpt") test, but the
+                    # Model2Life / MobilEM labels are STD_Kap_Si__PLUS__STD_qOCV_Si
+                    # and contain neither, so every checkup was silently skipped.
+                    label_kws = cfg.get("classification", {}).get(
+                        "checkup_label_keywords", ["cu", "rpt"])
+                    if isinstance(label_kws, str):
+                        label_kws = [label_kws]
+                    if any(str(k).lower() in label_lower for k in label_kws):
                         df_chk = df_chk.copy()
                         df_chk["abs_time"] = pd.to_datetime(df_chk["abs_time"], errors="coerce")
                         df_chk = df_chk.dropna(subset=["abs_time"])

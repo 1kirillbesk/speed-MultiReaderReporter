@@ -1,0 +1,128 @@
+# speed_MultiReaderReporter/config_bald.yaml
+#
+# BALD / Samsung 35E.  CNom 3.4 Ah, NMC, 2.65 - 4.20 V.
+#
+# Unlike LWHK, both capacities come out of the SAME checkup procedure
+# (rul_SAM_CU_varCapa), so no separate C/2 extractor is needed:
+#     step  9  -> cap_dis      C/2  discharge, -1.700 A, 4.119 -> 2.650 V
+#     step 15  -> cap_cha      C/2  charge,    +1.700 A
+#     step 19  -> ocv_dis      C/10 discharge, -0.340 A   (~35k points)
+#     step 22  -> ocv_cha      C/10 charge,    +0.340 A
+# DCIR pulses sit in their own rul_Pulse_SAM procedure.
+
+input:
+  path: "E:/download/BALD/raw_data_csv"
+  recurse: true
+  name_contains: ["BALD_35E"]     # add "SPEED_BALD" to include the other 41 cells
+  # Matched against the cell id with a (_|=|end) boundary. Empty = all cells.
+  cell_name_contain: []
+
+output:
+  root: "E:/download/BALD/out_bald"
+
+reports:
+  format: "csv"
+  mat_variable: "report"
+
+classification:
+  cycling_keywords: ["inhomosam_cyc", "inhomosam"]
+  checkup_keywords: ["sam_cu", "sam_rpt", "rpt_initial"]
+  duration_threshold_minutes: 60
+  rpt_keywords: ["sam_cu", "sam_rpt", "rpt_initial"]
+  cu_keyword: ["sam_cu", "sam_rpt", "rpt_initial"]   # str or list
+  pulse_procedure: "rul_Pulse_SAM"                   # BALD names it differently
+
+procedures:
+  rpt: "sam_cu"     # OCV sweeps + capacity charge live here
+  cyc: "sam_cu"     # ... and so does the capacity discharge
+
+# ---------------------------------------------------------------------------
+# BALD_35E_* and SPEED_BALD_* are kept as separate families: the two naming
+# schemes are different sub-studies and should not be pooled.
+# ---------------------------------------------------------------------------
+families:
+  - name: bald_35e
+    match: ["BALD_35E"]
+    procedures:
+      rpt: "sam_cu"
+      cyc: "sam_cu"
+    classification:
+      rpt_keywords: ["sam_cu", "sam_rpt", "rpt_initial"]
+      cu_keyword: ["sam_cu", "sam_rpt", "rpt_initial"]
+      split_label_keyword: null        # no step-16/SAVE split here
+      pair_rpt_with_previous: false    # the checkup file is self-contained
+      checkup_required_step: 34        # present in a complete SAM checkup
+      pulse_procedure: "rul_Pulse_SAM"
+    voltage:
+      high: 4.2
+      highm: 3.9
+      lowm: 3.6
+      low: 2.65
+    CU_steps:
+      ocv_cha: 22
+      ocv_dis: 19
+      capa_cha: 15
+      capa_dis: 9
+
+  - name: speed_bald
+    match: ["SPEED_BALD"]
+    procedures:
+      rpt: "sam_cu"
+      cyc: "sam_cu"
+    classification:
+      rpt_keywords: ["sam_cu", "sam_rpt", "rpt_initial"]
+      cu_keyword: ["sam_cu", "sam_rpt", "rpt_initial"]
+      split_label_keyword: null
+      pair_rpt_with_previous: false
+      checkup_required_step: 34
+      pulse_procedure: "rul_Pulse_SAM"
+    voltage:
+      high: 4.2
+      highm: 3.9
+      lowm: 3.6
+      low: 2.65
+    CU_steps:
+      ocv_cha: 22
+      ocv_dis: 19
+      capa_cha: 15
+      capa_dis: 9
+
+soh:
+  min_step_required: 20
+  i_thresh_A: 0.0
+  eod_v_cut_V: null
+  export_data: true
+  include_rpt: true
+  rpt_min_step_required: null
+  rpt_trailing_step_id: null
+  rpt_require_trailing_step: false
+
+legend:
+  ncol: 4
+
+voltage:
+  high: 4.2
+  highm: 3.9
+  lowm: 3.6
+  low: 2.65
+
+CU_steps:
+  ocv_cha: [22, 22]
+  ocv_dis: [19, 19]
+  capa_cha: [15, 15]
+  capa_dis: [9, 9]
+
+logging:
+  verbose: true
+
+cache:
+  existing_cell_mode: "summary_only"
+
+checkup_grouping:
+  mode: "both"
+  enabled: false
+  plot_segments: false
+  pause_label: "PAU"
+  min_points: 5
+  require_step_change: true
+  plot_max_points_per_segment: 5000

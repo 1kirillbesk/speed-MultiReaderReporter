@@ -150,7 +150,25 @@ def split_total_list(cell, total_list, cfg):
                     i += 1
                     continue
 
-                prev_df, prev_label = total_list[i - 1]
+                # Pair with the nearest PRECEDING segment that carries the cycling
+                # procedure, not blindly with i-1. In the JGNE files the cycling
+                # segment is immediately before the RPT so the two agree, but the
+                # Model2Life / MobilEM checkups interleave short stubs of the
+                # top-level programme between STD_Kap_Si and STD_qOCV_Si, and
+                # pairing with a 14-row stub loses the capacity discharge entirely.
+                cyc_key = str((cfg.get("procedures", {}) or {}).get("cyc", "")).lower()
+                j = i - 1
+                if cyc_key:
+                    for k in range(i - 1, -1, -1):
+                        if cyc_key in (total_list[k][1] or "").lower():
+                            j = k
+                            break
+                    else:
+                        logging.warning(
+                            f"[{cell}] no preceding {cyc_key!r} segment for '{label}'; "
+                            f"pairing with the immediately previous item instead."
+                        )
+                prev_df, prev_label = total_list[j]
 
                 try:
                     combined_df = pd.concat([prev_df, df], ignore_index=True, sort=False)

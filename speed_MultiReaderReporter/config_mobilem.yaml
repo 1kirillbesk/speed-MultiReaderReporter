@@ -1,0 +1,99 @@
+# speed_MultiReaderReporter/config_mobilem.yaml
+#
+# MobilEM - LBE Samsung 35E (NMC, 3.4 Ah nominal, 2.65 - 4.20 V), 93 cells.
+#
+# The checkup file nests sub-procedures under the top-level programme, and the two
+# that matter carry DIFFERENT meanings for the same step number, so the family
+# below maps each role to the procedure it actually lives in:
+#
+#   STD_qOCV_Si   step 2 -> capa_cha   +1.700 A (C/2) to 4.200 V
+#                 step 5 -> ocv_dis    -0.340 A (C/10), ~38k points
+#                 step 6 -> ocv_cha    +0.340 A (C/10)
+#   STD_Kap_Si    step 8 -> capa_dis   -1.700 A, ~3.27 Ah
+#
+# The pulse sub-procedures are spelled "STD_Puls_..." (German), so the loader's
+# default English "pulse" keyword does not match them; procedure_pulse_keywords
+# is set accordingly or the pulses become their own segments.
+
+input:
+  path: "E:/download/MobilEM/raw_data_csv"
+  recurse: true
+  name_contains: []
+  cell_name_contain: []
+
+output:
+  root: "E:/download/MobilEM/out_mobilem"
+
+reports:
+  format: "csv"
+  mat_variable: "report"
+
+classification:
+  cycling_keywords: ["cyc"]
+  checkup_keywords: ["qocv", "stdcup"]
+  duration_threshold_minutes: 60
+  rpt_keywords: ["qocv"]
+  cu_keyword: ["qocv"]
+  procedure_pulse_keywords: ["puls"]     # STD_Puls_* , not "pulse"
+  pulse_procedure: "STD_Puls"
+  # the paired label is STD_Kap_Si__PLUS__STD_qOCV_Si - no "cu"/"rpt" in it
+  checkup_label_keywords: ["qocv", "kap"]
+
+procedures:
+  rpt: "qocv"      # STD_qOCV_Si  - OCV sweeps + the C/2 capacity charge
+  cyc: "kap"       # STD_Kap_Si   - the C/2 capacity discharge
+
+families:
+  - name: samsung35e_lbe
+    match: ["LBE_Samsung_35E"]
+    procedures:
+      rpt: "qocv"
+      cyc: "kap"
+    classification:
+      rpt_keywords: ["qocv"]
+      cu_keyword: ["qocv"]
+      split_label_keyword: null
+      pair_rpt_with_previous: true    # qOCV segment follows the Kap segment
+      checkup_required_step: null
+      pulse_procedure: "STD_Puls"
+    voltage:
+      high: 4.2
+      highm: 3.9
+      lowm: 3.6
+      low: 2.65
+    CU_steps:
+      ocv_cha: 6
+      ocv_dis: 5
+      capa_cha: 2
+      capa_dis: 8
+
+soh:
+  min_step_required: 20
+  i_thresh_A: 0.0
+  eod_v_cut_V: null
+  export_data: true
+  include_rpt: true
+  rpt_min_step_required: null
+  rpt_trailing_step_id: null
+  rpt_require_trailing_step: false
+
+legend:
+  ncol: 4
+
+voltage: {high: 4.2, highm: 3.9, lowm: 3.6, low: 2.65}
+CU_steps: {ocv_cha: [6, 6], ocv_dis: [5, 5], capa_cha: [2, 2], capa_dis: [8, 8]}
+
+logging:
+  verbose: true
+
+cache:
+  existing_cell_mode: "summary_only"
+
+checkup_grouping:
+  mode: "both"
+  enabled: false
+  plot_segments: false
+  pause_label: "PAU"
+  min_points: 5
+  require_step_change: true
+  plot_max_points_per_segment: 5000

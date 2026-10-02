@@ -1,0 +1,87 @@
+# speed_MultiReaderReporter/config.yaml
+
+input:
+  path: "E:/download/meta/raw_data_csv"     # folder OR single file; detector will recurse if it's a folder
+  recurse: true
+  name_contains: ["jri_Aging_", "jri_CU_", "_Init"]
+  cell_name_contain: ["METABatt_"]
+# C:/Users/Public/Documents/example_reporter
+
+output:
+  root: "C:/Users/Public/Documents/takedata/meta/out"           # main pipeline will create per-cell subfolders under here
+
+reports:
+  format: "csv"    # one of: csv | mat | both
+  mat_variable: "report"   # name of the MATLAB struct variable
+
+classification:
+  cycling_keywords: ["cyc"]              # force cycling when present in program name
+  checkup_keywords: ["jri_cu", "init"]
+  duration_threshold_minutes: 60    # < 1h -> checkup
+  pairing_mode: "never"
+  pairing_keywords: []
+  standalone_checkup_keywords: ["jri_cu", "init"]
+  checkup_required_steps_any: []
+  feature_label_keywords: ["jri_cu", "rpt"]
+  procedure_pulse_keywords: ["pulse"]
+  rpt_keywords: []
+  cu_keyword: "jri_cu"
+
+soh:
+  min_step_required: 20    # guard for step-19 logic
+  i_thresh_A: 0.0          # ignore |I| below this when integrating step-19
+  eod_v_cut_V: null        # set (e.g., 3.0) if you want early cutoff by voltage
+  export_data: true        # export the underlying SoH scatter data alongside the plot
+  include_rpt: true        # include RPT checkups (step-6) in SoH
+  rpt_min_step_required: null
+  rpt_trailing_step_id: null
+  rpt_require_trailing_step: false
+
+analysis:
+  main_procedure_keywords: ["jri_cu"]
+  charge_procedure_keywords: ["charge"]
+  discharge_procedure_keywords: ["jri_cu"]
+
+legend:
+  ncol: 4
+
+voltage:
+  high: 3.6
+  highm: 3.45
+  lowm: 3.35
+  low: 3.3
+  lowl: 3.15
+  uplim: 3.6
+  downlim: 2
+
+CU_steps:
+  ocv_cha: [22, 22, 22]
+  ocv_dis: [19, 19, 19]
+  capa_cha: [2, 2, 2]
+  capa_dis: [9, 9, 9]
+
+logging:
+  verbose: true
+
+cache:
+  # "summary_only"  -> reuse existing cell_feature/<cell>.csv when it is newer
+  #                    than the raw inputs; do not reread raw data for that cell
+  # "full_raw_plots" -> force rereading raw data even when the summary csv is
+  #                     already up to date, so full voltage/current aging plots
+  #                     and other raw-data outputs are regenerated
+  existing_cell_mode: "summary_only"
+
+checkup_grouping:
+  # Use ONE of: off | report | plot | both
+  mode: "both"                 # disables both computation & plotting when "off"
+
+  # Backward-compat (optional): if you still have old keys, they're ignored
+  enabled: false              # ignored when 'mode' is set
+  plot_segments: false        # ignored when 'mode' is set
+
+  pause_label: "PAU"
+  min_points: 5
+  require_step_change: true
+
+  # Optional: limit plotted points per segment (for speed)
+  plot_max_points_per_segment: 5000

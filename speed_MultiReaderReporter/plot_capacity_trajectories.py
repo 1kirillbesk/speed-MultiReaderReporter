@@ -1,14 +1,28 @@
 # speed_MultiReaderReporter/plot_capacity_trajectories.py
 """Capacity / SoH trajectories per cell, for both capacity measurements.
 
-Two different measurements, one script:
+Several datasets and two different measurements, one script. --family selects
+BOTH the dataset and which capacity column is plotted; --out-dir then defaults
+to that dataset's pipeline output root (see FAMILY_OUT_DIR):
 
-  --family jgne      cell_feature/SPEED_JGNE_*.csv     cap_ocv_dis
-                     the C/10 OCV discharge of rul_JGNE_RPT_0C1 (step 6)
+  --family jgne           cell_feature/SPEED_JGNE_*        cap_ocv_dis
+                          C/10 OCV discharge of rul_JGNE_RPT_0C1 (step 6)
 
-  --family lwhk_c2   cell_feature_cu_c2/SPEED_LWHK_*   cap_dis
-                     the C/2 discharge of rul_eka_CU (step 6), 0.900 A vs
-                     CNom 1.8 Ah, extracted by extract_lwhk_cu_discharge.py
+  --family lwhk_c2        cell_feature_cu_c2/SPEED_LWHK_*  cap_dis
+                          C/2 discharge of rul_eka_CU (step 6), 0.900 A vs
+                          CNom 1.8 Ah, extracted by extract_lwhk_cu_discharge.py
+
+  --family bald           cell_feature/BALD_35E_*          cap_ocv_dis
+  --family bald_c2        ditto                            cap_dis
+  --family bald_temp      ditto, coloured by temp_C
+
+  --family samsung35e     cell_feature/LBE_Samsung_35E_*   cap_ocv_dis
+  --family samsung35e_c2  ditto                            cap_dis
+                          Model2Life + MobilEM in one output root
+                          (E:/download/samsung35e_combined, config_samsung35e.yaml)
+
+NOTE: --family defaults to "both", which is jgne + lwhk_c2 ONLY. Pass the
+family explicitly for BALD and Samsung.
 
 These are NOT the same quantity - a C/2 discharge delivers less than a C/10 one
 and carries polarisation - so the two families are drawn as separate figures and
@@ -21,10 +35,14 @@ CYCLING throughput in Ah. Cells are coloured by an experimental condition taken
 from the condition_overview_*.csv tables.
 
 Usage:
+    python speed_MultiReaderReporter/plot_capacity_trajectories.py --family samsung35e
+    python speed_MultiReaderReporter/plot_capacity_trajectories.py --family samsung35e_c2
+    python speed_MultiReaderReporter/plot_capacity_trajectories.py --family samsung35e \
+        --group-by study
+    python speed_MultiReaderReporter/plot_capacity_trajectories.py --family samsung35e \
+        --facet-by dod_pct --group-by profile
     python speed_MultiReaderReporter/plot_capacity_trajectories.py --family jgne
-    python speed_MultiReaderReporter/plot_capacity_trajectories.py --family jgne --group-by temp_C
     python speed_MultiReaderReporter/plot_capacity_trajectories.py --family lwhk_c2 --group-by fec
-    python speed_MultiReaderReporter/plot_capacity_trajectories.py --family both
     python speed_MultiReaderReporter/plot_capacity_trajectories.py --family jgne \
         --group-by temp_C --only 75,76,97,98 --label-cells
 """
@@ -99,7 +117,55 @@ PRESETS = {
         "thr_source": "pipeline",
         "thr_exclude": None,
     },
+    # Model2Life + MobilEM, one output root (config_samsung35e.yaml). These cells
+    # carry NO usable throughput_cum - the pipeline column is 0.0 for all 101 of
+    # them - so throughput is summed from cycling/report.csv instead, with the
+    # checkup programmes excluded so only the ageing programmes are counted.
+    "samsung35e": {
+        "subdir": "cell_feature",
+        "pattern": "LBE_Samsung_35E_*",
+        "cap_col": "cap_ocv_dis",
+        "cap_label": "OCV C/10 discharge capacity [Ah]",
+        "cond_csv": "condition_overview_samsung35e.csv",
+        "group_by": "dod_pct",
+        "prefer_col": "dod_pct",
+        "thr_source": "report",
+        "thr_exclude": r"STD_Kap|CUp|qOCV|Puls",
+    },
+    "samsung35e_c2": {
+        "subdir": "cell_feature",
+        "pattern": "LBE_Samsung_35E_*",
+        "cap_col": "cap_dis",
+        "cap_label": "C/2 discharge capacity [Ah]",
+        "cond_csv": "condition_overview_samsung35e.csv",
+        "group_by": "dod_pct",
+        "prefer_col": "dod_pct",
+        "thr_source": "report",
+        "thr_exclude": r"STD_Kap|CUp|qOCV|Puls",
+    },
 }
+
+# Output roots that are not the JGNE default, so --family alone is enough.
+FAMILY_OUT_DIR = {
+    "bald": Path("E:/download/BALD/out_bald"),
+    "bald_c2": Path("E:/download/BALD/out_bald"),
+    "bald_temp": Path("E:/download/BALD/out_bald"),
+    "samsung35e": Path("E:/download/samsung35e_combined"),
+    "samsung35e_c2": Path("E:/download/samsung35e_combined"),
+}
+
+
+def condition_values(cond: pd.DataFrame, col: str) -> pd.Series:
+    """Numeric condition column as numbers, categorical one as strings.
+
+    `study` and other text conditions used to collapse to all-NaN under a bare
+    pd.to_numeric, which silently drew every cell grey; fall back to the raw
+    strings when the column holds no numbers at all.
+    """
+    num = pd.to_numeric(cond[col], errors="coerce")
+    if num.notna().any():
+        return num
+    return cond[col].astype(str).replace({"nan": np.nan, "": np.nan})
 
 def load_conditions(out_dir: Path, cond_csv: str,
                     prefer_col: str | None = None) -> pd.DataFrame:
@@ -194,13 +260,17 @@ def category_of(cond: pd.DataFrame, cols: list[str]) -> dict:
             print(f"[WARN] no condition column {c!r}; ignored")
     if not use:
         return out
-    for _, row in cond.iterrows():
+    vals = {c: condition_values(cond, c) for c in use}
+    for i, (_, row) in enumerate(cond.iterrows()):
         parts = []
         for c in use:
-            v = pd.to_numeric(pd.Series([row[c]]), errors="coerce").iloc[0]
+            v = vals[c].iloc[i]
             if pd.isna(v):
                 continue
-            binary = set(pd.unique(pd.to_numeric(cond[c], errors="coerce").dropna())) <= {0, 1}
+            if not isinstance(v, (int, float, np.integer, np.floating)):
+                parts.append(f"{c}={v}")
+                continue
+            binary = set(pd.unique(vals[c].dropna())) <= {0, 1}
             if binary:
                 if v != 0:
                     parts.append(c)
@@ -234,14 +304,14 @@ def draw_facets(family: str, args, dest: Path, trajectories, cond, cfg):
         fmap = category_of(cond, [c.strip() for c in facet_by.split(",")])
         facet_by = facet_by.replace(",", "+")
     elif facet_by in cond.columns:
-        fmap = dict(zip(cond["cell"], pd.to_numeric(cond[facet_by], errors="coerce")))
+        fmap = dict(zip(cond["cell"], condition_values(cond, facet_by)))
     else:
         print(f"[WARN] no condition column {facet_by!r}"); return
     if "," in group_by:
         gmap = category_of(cond, [c.strip() for c in group_by.split(",")])
         group_by = group_by.replace(",", "+")
     elif group_by in cond.columns:
-        gmap = dict(zip(cond["cell"], pd.to_numeric(cond[group_by], errors="coerce")))
+        gmap = dict(zip(cond["cell"], condition_values(cond, group_by)))
     else:
         print(f"[WARN] no condition column {group_by!r}"); return
 
@@ -317,7 +387,7 @@ def draw_family(family: str, args, dest: Path):
         gmap = category_of(cond, [c.strip() for c in group_by.split(",")])
         group_by = group_by.replace(",", "/")
     elif group_by in cond.columns:
-        gmap = dict(zip(cond["cell"], pd.to_numeric(cond[group_by], errors="coerce")))
+        gmap = dict(zip(cond["cell"], condition_values(cond, group_by)))
     # '/' reads fine in a legend label but is a path separator in a filename
     gtag = re.sub(r"[^A-Za-z0-9]+", "_", group_by).strip("_")
 
@@ -394,7 +464,9 @@ def draw_family(family: str, args, dest: Path):
         lab = None
         if pd.notna(g) and g not in seen:
             n_g = sum(1 for _, _, gg in trajectories if gg == g)
-            lab = (f"{g}  (n={n_g})" if categorical else f"{group_by} = {g:g}")
+            gtxt = f"{g:g}" if isinstance(g, (int, float, np.integer, np.floating)) else str(g)
+            lab = (f"{g}  (n={n_g})" if categorical
+                   else f"{group_by} = {gtxt}  (n={n_g})")
             seen.add(g)
         elif pd.isna(g) and "na" not in seen:
             lab = f"{group_by} n/a"
@@ -474,9 +546,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family",
-                    choices=["jgne", "lwhk_c2", "bald", "bald_c2", "bald_temp", "both"],
+                    choices=sorted(PRESETS) + ["both"],
                     default="both")
-    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="pipeline output root; defaults per family "
+                         f"(default: {DEFAULT_OUT_DIR})")
     ap.add_argument("--dest", type=Path, default=None,
                     help=f"output folder (default: <out-dir>/{DEFAULT_SUBFOLDER})")
     ap.add_argument("--exclude", default=None,
@@ -500,6 +574,8 @@ def main():
                     help="annotate the end of each trajectory with the cell number")
     args = ap.parse_args()
 
+    if args.out_dir is None:
+        args.out_dir = FAMILY_OUT_DIR.get(args.family, DEFAULT_OUT_DIR)
     dest = args.dest or (args.out_dir / DEFAULT_SUBFOLDER)
     dest.mkdir(parents=True, exist_ok=True)
     print(f"writing to {dest}")
