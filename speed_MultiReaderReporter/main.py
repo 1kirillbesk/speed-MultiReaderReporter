@@ -5,6 +5,7 @@ import json
 import sys
 import yaml
 import re
+import os
 
 # Make direct script execution work by exposing the package parent before imports.
 here = Path(__file__).resolve().parent
@@ -26,6 +27,7 @@ except ImportError:
 MANIFEST_NAME = ".processing_manifest.json"
 CACHE_MODE_SUMMARY_ONLY = "summary_only"
 CACHE_MODE_FULL_RAW_PLOTS = "full_raw_plots"
+FEATURE_SCHEMA_VERSION = 4
 
 def load_config(cfg_path: Path) -> dict:
     with cfg_path.open("r", encoding="utf-8") as f:
@@ -94,7 +96,12 @@ def should_process_cell(cell_id: str,
     if cache_mode == CACHE_MODE_FULL_RAW_PLOTS:
         return True, "existing_cell_mode forces full raw reload", False
 
-    cached_inputs = manifest.get("cells", {}).get(cell_id, {}).get("inputs")
+    cell_manifest = manifest.get("cells", {}).get(cell_id, {})
+    cached_inputs = cell_manifest.get("inputs")
+    cached_feature_version = cell_manifest.get("feature_version")
+    if cached_feature_version != FEATURE_SCHEMA_VERSION:
+        return True, "feature extraction schema changed", False
+
     if cached_inputs == current_inputs:
         if summary_path.exists():
             return False, "inputs unchanged; summary already exists", False
@@ -103,7 +110,10 @@ def should_process_cell(cell_id: str,
     if cached_inputs is None and summary_path.exists():
         summary_mtime_ns = summary_path.stat().st_mtime_ns
         if current_inputs and all(meta["mtime_ns"] <= summary_mtime_ns for meta in current_inputs.values()):
-            manifest.setdefault("cells", {})[cell_id] = {"inputs": current_inputs}
+            manifest.setdefault("cells", {})[cell_id] = {
+                "inputs": current_inputs,
+                "feature_version": FEATURE_SCHEMA_VERSION,
+            }
             return False, "summary newer than all inputs; bootstrapped cache manifest", True
 
     if cached_inputs is None:
@@ -111,12 +121,20 @@ def should_process_cell(cell_id: str,
     return True, "new, changed, or removed input detected", False
 
 def update_manifest_for_cell(manifest: dict, cell_id: str, items: list[DetectedItem]) -> None:
-    manifest.setdefault("cells", {})[cell_id] = {"inputs": build_item_manifest(items)}
+    manifest.setdefault("cells", {})[cell_id] = {
+        "inputs": build_item_manifest(items),
+        "feature_version": FEATURE_SCHEMA_VERSION,
+    }
 
 def main():
     # ---------- config ----------
     here = Path(__file__).resolve().parent
-    cfg = load_config(here / "config_bald_homocomp.yaml")
+    config_name = os.environ.get("SPEED_CONFIG", "config_homo_JGNE.yaml")
+    cfg = load_config(here / config_name)
+    if os.environ.get("SPEED_NO_GROUPED_PLOTS", "").lower() in {"1", "true", "yes"}:
+        cfg.setdefault("checkup_grouping", {})["mode"] = "off"
+        cfg.setdefault("plots", {})["grouped_runs"] = False
+        cfg.setdefault("plots", {})["feature_curves"] = False
 
     in_path = Path(cfg["input"]["path"]).resolve()
     recurse = bool(cfg["input"].get("recurse", True))
@@ -124,6 +142,12 @@ def main():
     out_root.mkdir(parents=True, exist_ok=True)
     verbose = bool(cfg.get("logging", {}).get("verbose", True))
     cache_mode = str(cfg.get("cache", {}).get("existing_cell_mode", CACHE_MODE_SUMMARY_ONLY)).lower()
+    if cache_mode == CACHE_MODE_FULL_RAW_PLOTS and os.environ.get(
+        "SPEED_NO_GROUPED_PLOTS", ""
+    ).lower() in {"1", "true", "yes"}:
+        # A plotting-disabled forced reload writes feature outputs, so record it
+        # as a schema-complete run in the standard summary cache mode.
+        cache_mode = CACHE_MODE_SUMMARY_ONLY
     manifest = load_manifest(out_root, verbose=verbose)
     manifest_dirty = False
 

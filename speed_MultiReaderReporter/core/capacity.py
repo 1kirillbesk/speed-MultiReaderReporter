@@ -345,8 +345,168 @@ def _cu_steps(cfg: dict, choice: int) -> dict[str, int]:
         steps[key] = int(val)
     return steps
 
+
+def _capacity_from_qstep(segment: pd.DataFrame) -> float:
+    """Return the magnitude of the integrated AhStep capacity for a segment."""
+    if segment.empty or "qstep" not in segment:
+        return 0.0
+    q = pd.to_numeric(segment["qstep"], errors="coerce").dropna()
+    if q.empty:
+        return 0.0
+    # AhStep resets at each numbered step. Sum the increment in each step so
+    # multi-step CC/CV or pulse groups retain the capacity across transitions.
+    if "step_int" in segment.columns:
+        total = 0.0
+        values = pd.to_numeric(segment["qstep"], errors="coerce").reset_index(drop=True)
+        steps = pd.to_numeric(segment["step_int"], errors="coerce").reset_index(drop=True)
+        for step in pd.unique(steps.dropna()):
+            current = values.loc[steps == step].dropna()
+            if current.empty:
+                continue
+            total += abs(float(current.iloc[-1] - current.iloc[0]))
+        return total
+    return float(abs(q.iloc[-1] - q.iloc[0]))
+
+
+def _step_list(value) -> list[int]:
+    if isinstance(value, (list, tuple, set)):
+        return [int(step) for step in value]
+    return [int(value)]
+
+
+def _select_step_segment(df: pd.DataFrame, source_runs, procedure: str,
+                         step_ids, direction: str,
+                         anchor_time: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Find a configured high-rate step in the checkup and full cell run list."""
+    step_ids = _step_list(step_ids)
+    frames = [df]
+    frames.extend(run_df for run_df, _ in (source_runs or []))
+    pieces = []
+    for frame in frames:
+        if not {"procedure", "step_int"}.issubset(frame.columns):
+            continue
+        mask = (frame["procedure"].astype(str).str.contains(procedure, case=False, na=False)
+                & pd.to_numeric(frame["step_int"], errors="coerce").isin(step_ids))
+        if "state" in frame:
+            mask &= frame["state"].astype(str).str.upper().str.contains(
+                "CHA" if direction == "charge" else "DCH", na=False
+            )
+        selected = frame.loc[mask]
+        if not selected.empty:
+            pieces.append(selected)
+    if not pieces:
+        return pd.DataFrame(columns=df.columns)
+    out = pd.concat(pieces, ignore_index=True, sort=False)
+    if "abs_time" in out.columns:
+        out = out.drop_duplicates(subset=["abs_time"], keep="first").sort_values("abs_time")
+        if anchor_time is not None:
+            times = pd.to_datetime(out["abs_time"], errors="coerce")
+            # Avoid mixing same-numbered steps from unrelated ageing cycles.
+            # The fast test step belongs near this checkup's RPT timestamp.
+            near_checkup = (times >= anchor_time - pd.Timedelta(hours=12)) & (
+                times <= anchor_time + pd.Timedelta(hours=12)
+            )
+            out = out.loc[near_checkup]
+        if out.empty:
+            return pd.DataFrame(columns=df.columns)
+    if "step_int" in out.columns and "qstep" in out.columns:
+        out["_qstep_raw"] = pd.to_numeric(out["qstep"], errors="coerce")
+    return out.reset_index(drop=True)
+
+
+def _extract_capacity_curve(segment: pd.DataFrame, cell: str, cfg: dict,
+                            tag: str) -> dict:
+    """Extract voltage/capacity curves and derivatives for one fast step."""
+    if len(segment) < 12:
+        raise ValueError(f"[{cell}] {tag} segment has only {len(segment)} rows")
+    result: dict = {}
+    v = pd.to_numeric(segment["voltage_V"], errors="coerce").to_numpy(float)
+    q_raw = pd.to_numeric(segment.get("_qstep_raw", segment["qstep"]),
+                          errors="coerce").to_numpy(float)
+    temp = pd.to_numeric(segment.get("T1", pd.Series(np.nan, index=segment.index)),
+                         errors="coerce").to_numpy(float)
+    time = pd.to_datetime(segment["abs_time"], errors="coerce")
+    if "relative_time_s" in segment.columns:
+        time_s = pd.to_numeric(segment["relative_time_s"], errors="coerce").to_numpy(float)
+    else:
+        time_s = (time - time.iloc[0]).dt.total_seconds().to_numpy(float)
+    cur = pd.to_numeric(segment["current_A"], errors="coerce").to_numpy(float)
+    valid = np.isfinite(v) & np.isfinite(q_raw) & np.isfinite(cur)
+    valid &= np.isfinite(time_s)
+    v, q_raw, cur = v[valid], q_raw[valid], cur[valid]
+    time_s, temp = time_s[valid], temp[valid]
+    source_valid = valid.copy()
+    if "step_int" in segment.columns:
+        step_values = pd.to_numeric(segment.loc[valid, "step_int"], errors="coerce").to_numpy()
+        # Pulse/intermediate steps from the regular ageing program can share
+        # procedure names/step IDs with checkup capacity steps. Keep only the
+        # configured CC/CV portion whose samples carry real capacity.
+        active = np.abs(cur) > 0.05
+        v, q_raw, cur = v[active], q_raw[active], cur[active]
+        time_s, temp, step_values = time_s[active], temp[active], step_values[active]
+        if len(v) < 12:
+            raise ValueError(f"[{cell}] {tag} segment has too few active-current samples")
+    else:
+        step_values = np.zeros(len(v), dtype=int)
+    if len(v) < 12:
+        raise ValueError(f"[{cell}] {tag} segment has too few finite voltage/capacity samples")
+
+    # The current direction determines a monotonicized x-axis for ICA/DVA.
+    charging = float(np.nanmedian(cur[:min(len(cur), 20)])) >= 0
+    direction = "cha" if charging else "dis"
+    q = np.zeros(len(q_raw), dtype=float)
+    offset = 0.0
+    if len(step_values) and np.isfinite(step_values).any():
+        step_ids = pd.unique(step_values[np.isfinite(step_values)])
+    else:
+        step_ids = []
+    for step_id in step_ids:
+        indices = np.flatnonzero(step_values == step_id)
+        values = q_raw[indices]
+        relative = np.maximum.accumulate(values - values[0])
+        q[indices] = relative + offset
+        offset += float(relative[-1])
+    q_progress = q - q[0]
+
+    # Clean duplicate/reversed samples for stable spline derivatives while
+    # retaining raw trace arrays for plotting/export.
+    clean_segment = segment.loc[source_valid].iloc[np.flatnonzero(active)].copy().reset_index(drop=True) \
+        if "step_int" in segment.columns else segment.loc[valid].copy().reset_index(drop=True)
+    clean_segment["qstep"] = q
+    v_grid, dq_dv, q_vs_v = extract_ICA(clean_segment, cell, cfg)
+    try:
+        q_grid, dv_dq, v_vs_q = extract_DVA(clean_segment, cell, cfg)
+    except (ValueError, UnboundLocalError):
+        logging.warning("[%s] %s fast DVA curve skipped: insufficient unique capacity values", cell, tag)
+        q_grid = np.array([], dtype=float)
+        dv_dq = np.array([], dtype=float)
+        v_vs_q = np.array([], dtype=float)
+
+    result[f"Vfast_{direction}"] = np.asarray(v_grid).ravel().tolist()
+    result[f"dQdVfast_{direction}"] = np.asarray(dq_dv).ravel().tolist()
+    result[f"Qfast_intV_{direction}"] = np.asarray(q_vs_v).ravel().tolist()
+    result[f"Qfast_{direction}"] = np.asarray(q_grid).ravel().tolist()
+    result[f"dVdQfast_{direction}"] = np.asarray(dv_dq).ravel().tolist()
+    result[f"Vfast_intQ_{direction}"] = np.asarray(v_vs_q).ravel().tolist()
+    # Lists serialize fully in CSV; NumPy's repr truncates long arrays.
+    result[f"qstep_fast_raw_{direction}"] = q_raw.tolist()
+    result[f"Vfast_raw_{direction}"] = v.tolist()
+    result[f"Qfast_raw_{direction}"] = q_progress.tolist()
+    result[f"time_fast_raw_{direction}_s"] = time_s.tolist()
+    result[f"current_fast_raw_{direction}_A"] = cur.tolist()
+    result[f"temperature_fast_raw_{direction}_C"] = temp.tolist()
+    result[f"cap_fast_{direction}"] = float(np.nanmax(q_progress) - np.nanmin(q_progress))
+
+    pmax = get_peaks(v_grid, dq_dv, distance=50)
+    pmin = get_minima(v_grid, dq_dv, distance=50)
+    result[f"peakVfast_max_{direction}"] = pmax["x_peaks"].tolist()
+    result[f"peakICAfast_max_{direction}"] = pmax["y_peaks"].tolist()
+    result[f"peakVfast_min_{direction}"] = pmin["x_peaks"].tolist()
+    result[f"peakICAfast_min_{direction}"] = pmin["y_peaks"].tolist()
+    return result
+
 # here, analyze the checkup part
-def extract_features(df,cell,cfg):
+def extract_features(df,cell,cfg,source_runs=None):
     cfg = resolve_family_cfg(cfg, cell)
     features = {}
     # dt = df["relative_time_s"].diff()
@@ -361,27 +521,73 @@ def extract_features(df,cell,cfg):
     capa_cha_step = steps['capa_cha']; capa_dis_step = steps['capa_dis']
     mask_ocv_cha = ((df["step_int"] == ocv_cha_step) & rpt_mask)
     mask_ocv_dis = ((df["step_int"] == ocv_dis_step) & rpt_mask)
-    mask_capa_cha = ((df["step_int"] == capa_cha_step) & rpt_mask)
-    mask_capa_dis = ((df["step_int"] == capa_dis_step) & rpt_cyc_mask)
-
+    # Fast-rate checkup segments can be kept in the capacity procedure or
+    # embedded in the homocomp procedure depending on family. Use explicit
+    # family step mapping, falling back to the legacy CU_steps behavior.
+    fast_cfg = (cfg or {}).get("high_rate_steps", {}) or {}
+    fast_charge_proc = str(fast_cfg.get("charge_procedure", cyc_proc))
+    fast_discharge_proc = str(fast_cfg.get("discharge_procedure", cyc_proc))
+    fast_charge_steps = _step_list(fast_cfg.get("charge", capa_cha_step))
+    fast_discharge_steps = _step_list(fast_cfg.get("discharge", capa_dis_step))
+    fast_capacity_proc = str(fast_cfg.get("capacity_procedure", cyc_proc))
+    fast_capacity_step = _step_list(fast_cfg.get("capacity_discharge", capa_dis_step))
+    mask_capa_cha = (df["step_int"] == capa_cha_step) & rpt_mask
+    mask_capa_dis = (df["step_int"] == capa_dis_step) & rpt_cyc_mask
     df_ocv_cha = df.loc[mask_ocv_cha]; df_ocv_dis = df.loc[mask_ocv_dis]
     df_capa_cha = df.loc[mask_capa_cha]; df_capa_dis = df.loc[mask_capa_dis]
+    anchor_time = pd.to_datetime(df.loc[rpt_mask, "abs_time"], errors="coerce").min()
+    capacity_source_runs = list(source_runs or []) + [(df, "checkup")]
+    df_capa_dis = _select_step_segment(
+        df, capacity_source_runs, fast_capacity_proc, fast_capacity_step,
+        "discharge", anchor_time
+    )
+    df_fast_cha = _select_step_segment(
+        df, source_runs, fast_charge_proc, fast_charge_steps, "charge", anchor_time
+    )
+    df_fast_dis = _select_step_segment(
+        df, source_runs, fast_discharge_proc, fast_discharge_steps, "discharge", anchor_time
+    )
+    fast_extraction_required = bool(fast_cfg.get("required", False))
 
     # Fail with the reason instead of an IndexError on the empty .iloc[-1] below.
-    for name, sub, step, proc in (("ocv_cha", df_ocv_cha, ocv_cha_step, rpt_proc),
-                                  ("ocv_dis", df_ocv_dis, ocv_dis_step, rpt_proc),
-                                  ("capa_cha", df_capa_cha, capa_cha_step, rpt_proc),
-                                  ("capa_dis", df_capa_dis, capa_dis_step, cyc_proc)):
+    for name, sub, step, proc in (
+        ("ocv_cha", df_ocv_cha, ocv_cha_step, rpt_proc),
+        ("ocv_dis", df_ocv_dis, ocv_dis_step, rpt_proc),
+        ("capa_cha", df_capa_cha, capa_cha_step, rpt_proc),
+    ):
         if sub.empty:
             raise ValueError(
                 f"[{cell}] no rows for {name}: step {step} within procedure ~ {proc!r} "
                 f"(family={cfg.get('_family', 'top-level')}); "
                 f"procedures present: {sorted(set(df['procedure'].dropna().astype(str)))}"
             )
+    if fast_extraction_required:
+        for name, sub, step, proc in (
+            ("high_rate_cha", df_fast_cha, fast_charge_steps, fast_charge_proc),
+            ("high_rate_dis", df_fast_dis, fast_discharge_steps, fast_discharge_proc),
+        ):
+            if sub.empty:
+                raise ValueError(
+                    f"[{cell}] no rows for {name}: step {step} within procedure ~ {proc!r}"
+                )
 
     features['CU_time'] = df["abs_time"].iloc[0]
-    features['cap_dis'] = df_capa_dis["qstep"].iloc[-1]; features['cap_cha'] = df_capa_cha["qstep"].iloc[-1]
-    features['cap_ocv_dis'] = df_ocv_cha["qstep"].iloc[-1]; features['cap_ocv_dis'] = df_ocv_dis["qstep"].iloc[-1]
+    features["cap_dis"] = (
+        _capacity_from_qstep(df_capa_dis)
+        if not df_capa_dis.empty else np.nan
+    )
+    features["cap_cha"] = _capacity_from_qstep(df_capa_cha)
+    features["cap_ocv_cha"] = _capacity_from_qstep(df_ocv_cha)
+    features["cap_ocv_dis"] = _capacity_from_qstep(df_ocv_dis)
+    features["cap_fast_cha"] = _capacity_from_qstep(df_fast_cha) if not df_fast_cha.empty else np.nan
+    features["cap_fast_dis"] = _capacity_from_qstep(df_fast_dis) if not df_fast_dis.empty else np.nan
+
+    # Persist the complete high-rate charge/discharge sampled traces plus
+    # voltage/capacity derivative curves and peak features.
+    if not df_fast_cha.empty:
+        features.update(_extract_capacity_curve(df_fast_cha, cell, cfg, "fast_charge"))
+    if not df_fast_dis.empty:
+        features.update(_extract_capacity_curve(df_fast_dis, cell, cfg, "fast_discharge"))
     # todo: make the input a list for shorter code
     # get the ICA info for feature extraction
     V_cha, dQdV_cha, Q_intcha = extract_ICA(df_ocv_cha, cell, cfg)

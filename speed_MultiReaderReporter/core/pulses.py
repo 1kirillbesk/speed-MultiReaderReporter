@@ -230,6 +230,28 @@ def analyze_df_pulse(
         "R_10s_ohm": df_pulse["R_10s_ohm"].tolist(),
     }
 
+    # Keep the source pulse trace and detected pulse measurements in the
+    # per-checkup feature row as well as the derived resistance lists. Lists
+    # serialize in CSV without NumPy's long-array truncation.
+    if not df_filtered.empty:
+        pulse_time = _to_rel_seconds(df_filtered[time_col]).to_numpy(dtype=float)
+        pulse_voltage = pd.to_numeric(df_filtered[voltage_col], errors="coerce").to_numpy(dtype=float)
+        pulse_current = pd.to_numeric(df_filtered[current_col], errors="coerce").to_numpy(dtype=float)
+        pulse_steps = pd.to_numeric(df_filtered[step_col], errors="coerce").to_numpy(dtype=float)
+    else:
+        pulse_time = pulse_voltage = pulse_current = pulse_steps = np.array([], dtype=float)
+    pulse_lists.update({
+        "pulse_time_s": pulse_time.tolist(),
+        "pulse_voltage_V": pulse_voltage.tolist(),
+        "pulse_current_A": pulse_current.tolist(),
+        "pulse_step_int": pulse_steps.tolist(),
+        "pulse_events": [pulse for section in out.values() for pulse in section["pulses"]],
+        "pulse_soc_sections": {
+            soc: {"n_rows": section["n_rows"], "n_pulses": section["n_pulses"]}
+            for soc, section in out.items()
+        },
+    })
+
     return pulse_lists
 
 # --- Example usage ---

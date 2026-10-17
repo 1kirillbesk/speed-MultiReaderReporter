@@ -12,6 +12,9 @@ input:
 output:
   root: "E:/download/jgne/out_jgne"           # main pipeline will create per-cell subfolders under here
 
+cache:
+  existing_cell_mode: "full_raw_plots"  # force raw reload so feature-schema updates are applied
+
 reports:
   format: "csv"    # one of: csv | mat | both
   mat_variable: "report"   # name of the MATLAB struct variable
@@ -56,7 +59,14 @@ families:
       ocv_cha: 9
       ocv_dis: 6
       capa_cha: 2
-      capa_dis: 12
+      capa_dis: 12                  # high-rate cycling discharge
+    high_rate_steps:
+      charge_procedure: "homocomp"
+      charge: [8, 9]               # CC charge followed by CV taper
+      discharge_procedure: "homocomp"
+      discharge: 12
+      capacity_procedure: "homocomp"
+      capacity_discharge: 12
 
   - name: lwhk
     match: ["SPEED_LWHK"]
@@ -79,6 +89,13 @@ families:
       ocv_dis: 19                   # -0.18 A, 3.462 -> 2.000 V
       capa_cha: 15                  # +0.90 A
       capa_dis: 9                   # -0.90 A
+    high_rate_steps:
+      charge_procedure: "lw_cu"
+      charge: [15, 16]
+      discharge_procedure: "lw_cu"
+      discharge: 9
+      capacity_procedure: "lw_cu"
+      capacity_discharge: 9
 
 
 soh:

@@ -1,17 +1,25 @@
 # speed_MultiReaderReporter/extract_curve_features.py
-"""Pull the stored peak points and delta-dQ/dV statistics out of cell_feature/.
+"""Extract tidy features from existing per-cell feature CSVs (no raw ZIP loading).
 
 Reads every cell_feature/<cell>.csv written by the pipeline and emits two tidy
 tables:
 
   curve_features_scalars.csv
-      one row per (cell, checkup): CU_time, weeks, capacities, throughput and
-      every mean_/var_ statistic already computed by the pipeline.
+       one row per (cell, checkup): CU_time, weeks, capacities, throughput and
+       every mean_/var_ statistic already computed by the pipeline. For JGNE,
+       also computes separate OCV/fast discharge retention (each relative to
+       its own first checkup), the OCV-minus-fast capacity gap in Ah and in
+       normalized retention, and fast DVA peak widths in Ah.
+
+       Width = width of the most prominent maximum/minimum at half-prominence
+       on the saved full dV/dQ vs Q curve. Full OCV DVA curves are not stored
+       in older feature CSVs, so OCV widths are retained only if already present.
 
   curve_features_peaks.csv
-      one row per (cell, checkup, curve, direction, kind, peak): the peak
-      coordinates unpacked from the peak* array columns.
-          curve      ICA (dQ/dV over V) | DVA (dV/dQ over Q)
+       one row per (cell, checkup, curve, direction, kind, peak): the peak
+       coordinates unpacked from the peak* array columns.
+           curve      ICA (dQ/dV over V) | DVA (dV/dQ over Q) |
+                      fast ICA (dQ/dV over V)
           direction  cha | dis
           kind       max | min
           x, y       peak position and height in that curve's own units
@@ -32,6 +40,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from core.discharge_features import add_discharge_capacity_features, dva_peak_width_Ah
 
 DEFAULT_OUT_DIR = Path("E:/download/jgne/out_jgne")
 
@@ -45,10 +54,32 @@ PEAK_SPECS = [
     ("DVA", "cha", "min", "peakQ_min_cha", "peakDVA_min_cha"),
     ("DVA", "dis", "max", "peakQ_max_dis", "peakDVA_max_dis"),
     ("DVA", "dis", "min", "peakQ_min_dis", "peakDVA_min_dis"),
+    ("fast ICA", "cha", "max", "peakVfast_max_cha", "peakICAfast_max_cha"),
+    ("fast ICA", "cha", "min", "peakVfast_min_cha", "peakICAfast_min_cha"),
+    ("fast ICA", "dis", "max", "peakVfast_max_dis", "peakICAfast_max_dis"),
+    ("fast ICA", "dis", "min", "peakVfast_min_dis", "peakICAfast_min_dis"),
 ]
 
-# Curve arrays that stay in the CSV; excluded from the scalar table.
-CURVE_COLS = ["Vcha", "dQdVcha", "Q_intVcha"]
+# Full curve and auxiliary arrays in cell_feature/; never include them in the
+# scalar table. The legacy script excluded only the slow-charge ICA arrays.
+CURVE_COLS = {
+    "Vcha", "dQdVcha", "Q_intVcha", "Vdis", "dQdVdis", "Q_intVdis",
+    "Qcha", "dVdQcha", "V_intQcha", "Qdis", "dVdQdis", "V_intQdis",
+    "VdisT", "dTdV", "T_intV", "pulse_events", "pulse_soc_sections",
+    "R_0.2s_ohm", "R_1s_ohm", "R_10s_ohm",
+}
+for direction in ("cha", "dis"):
+    CURVE_COLS.update({
+        f"Vfast_{direction}", f"dQdVfast_{direction}",
+        f"Qfast_intV_{direction}", f"Qfast_{direction}",
+        f"dVdQfast_{direction}", f"Vfast_intQ_{direction}",
+    })
+    CURVE_COLS.update(f"{name}_{direction}" for name in (
+        "qstep_fast_raw", "Vfast_raw", "Qfast_raw",
+    ))
+    CURVE_COLS.update({f"time_fast_raw_{direction}_s", f"current_fast_raw_{direction}_A",
+                       f"temperature_fast_raw_{direction}_C"})
+CURVE_COLS.update({"pulse_time_s", "pulse_voltage_V", "pulse_current_A", "pulse_step_int"})
 
 def parse_array(value) -> np.ndarray:
     """Parse a numpy-repr string ('[1.0 2.0 ...]') back into an array.
@@ -75,8 +106,31 @@ def extract_cell(csv_path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     cell = csv_path.stem
     df = pd.read_csv(csv_path)
 
+    if cell.upper().startswith("SPEED_JGNE_") and not df.empty:
+        df = df.sort_values("CU_time", kind="stable").reset_index(drop=True)
+        df = add_discharge_capacity_features(df)
+        for direction in ("cha", "dis"):
+            q_col, dva_col = f"Qfast_{direction}", f"dVdQfast_{direction}"
+            if q_col not in df or dva_col not in df:
+                continue
+            for kind in ("max", "min"):
+                name = f"dva_fast_{direction}_{kind}_width_Ah"
+                widths = []
+                for index, (q, dva) in enumerate(zip(df[q_col], df[dva_col])):
+                    try:
+                        widths.append(dva_peak_width_Ah(parse_array(q), parse_array(dva), kind=kind))
+                    except ValueError as exc:
+                        print(f"[WARN] {cell} checkup {index} {name}: {exc}")
+                        widths.append(np.nan)
+                df[name] = widths
+
     peak_cols = [c for spec in PEAK_SPECS for c in spec[3:]]
-    scalar_cols = [c for c in df.columns if c not in peak_cols + CURVE_COLS]
+    array_cols = CURVE_COLS | set(peak_cols) | {
+        f"peak{axis}fast_{kind}_{direction}"
+        for axis in ("V", "ICA") for kind in ("max", "min")
+        for direction in ("cha", "dis")
+    }
+    scalar_cols = [c for c in df.columns if c not in array_cols]
 
     scalars = df[scalar_cols].copy()
     scalars.insert(0, "cell", cell)

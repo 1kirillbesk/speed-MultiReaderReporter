@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import logging
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from .classify import *
 from .plotting import *
@@ -14,6 +15,8 @@ from .pulses import *
 from .soh import cumulative_throughput_until
 from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
+from .deep_discharge import extract_plot_lwhk_deep_discharge
+from .discharge_features import add_discharge_capacity_features, dva_width_features
 import re
 
 # SPEED_LOG_DIR lets a different dataset (BALD, ...) keep its own errors.log
@@ -52,13 +55,17 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             logging.exception(f"[{cell}] Failed while splitting total_list: {e}")
             continue
 
+        # --- optional LWHK terminal/deep cycling discharge extraction ---
+        extract_plot_lwhk_deep_discharge(cell, total_list, cell_dir)
+
         # --- plots (non-critical) ---
-        try:
-            save_group_plot(cell, total_list, cell_dir / "total", "total", legend_ncol)
-            save_group_plot(cell, checkup_list, cell_dir / "checkup", "checkup", legend_ncol)
-            save_group_plot(cell, cycling_list, cell_dir / "cycling", "cycling", legend_ncol)
-        except Exception as e:
-            logging.exception(f"[{cell}] save_group_plot total failed: {e}")
+        if cfg.get("plots", {}).get("grouped_runs", True):
+            try:
+                save_group_plot(cell, total_list, cell_dir / "total", "total", legend_ncol)
+                save_group_plot(cell, checkup_list, cell_dir / "checkup", "checkup", legend_ncol)
+                save_group_plot(cell, cycling_list, cell_dir / "cycling", "cycling", legend_ncol)
+            except Exception as e:
+                logging.exception(f"[{cell}] save_group_plot total failed: {e}")
 
         # --- reports (non-critical) ---
         try:
@@ -175,7 +182,9 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                         df_chk = df_chk.dropna(subset=["abs_time"])
                         df_chk["relative_time_s"] = (df_chk["abs_time"] - df_chk["abs_time"].iloc[0]).dt.total_seconds()
 
-                        ocv_features = extract_features(df_chk, cell, cfg)
+                        ocv_features = extract_features(
+                            df_chk, cell, cfg, source_runs=total_list
+                        )
 
                         pulse_proc = str(cfg.get("classification", {})
                                          .get("pulse_procedure", "rul_Pulse"))
@@ -184,14 +193,37 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                         df_filtered = df_chk[df_chk["procedure"].astype(str)
                                              .str.contains(pulse_proc, case=False, na=False)
                                              ].reset_index(drop=True)
-                        # df_filtered = (
-                        #     df_chk
-                        #     .loc[df_chk.index[df_chk["step_int"] == 26].max() + 1:]
-                        #     .query("0 <= step_int <= 15")
-                        # )
+                        if df_filtered.empty:
+                            # The classifier can split the standalone pulse
+                            # procedure out of df_chk. Reattach the nearest pulse
+                            # block from the full cell input for this checkup.
+                            pulse_frames = [
+                                run_df.loc[run_df["procedure"].astype(str).str.contains(
+                                    pulse_proc, case=False, na=False
+                                )].copy()
+                                for run_df, _ in total_list
+                                if "procedure" in run_df.columns
+                            ]
+                            pulse_frames = [frame for frame in pulse_frames if not frame.empty]
+                            if pulse_frames:
+                                pulse_df = pd.concat(pulse_frames, ignore_index=True, sort=False)
+                                pulse_df = pulse_df.drop_duplicates(
+                                    subset=["abs_time"]
+                                ).sort_values("abs_time")
+                                pulse_time = pd.to_datetime(pulse_df["abs_time"], errors="coerce")
+                                anchor = pd.to_datetime(df_chk["abs_time"], errors="coerce").min()
+                                nearby = pulse_df.loc[
+                                    (pulse_time >= anchor - pd.Timedelta(hours=12))
+                                    & (pulse_time <= anchor + pd.Timedelta(hours=12))
+                                ]
+                                if not nearby.empty:
+                                    df_filtered = nearby.reset_index(drop=True)
                         pulse_feature = analyze_df_pulse(df_filtered)
 
                         features = ocv_features | pulse_feature
+                        features["pulse_source"] = (
+                            "raw pulse trace" if not df_filtered.empty else "missing"
+                        )
                         rows.append(features)
                 except Exception as e:
                     logging.exception(f"[{cell}] feature extraction failed for checkup run '{lbl_chk}': {e}")
@@ -202,6 +234,16 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
                 continue
 
             df_summary = pd.DataFrame(rows)
+            if "SPEED_JGNE_" in cell.upper():
+                df_summary = add_discharge_capacity_features(df_summary)
+                width_rows = [dva_width_features({
+                    "ocv_cha": (row.get("Qcha"), row.get("dVdQcha")),
+                    "ocv_dis": (row.get("Qdis"), row.get("dVdQdis")),
+                    "fast_cha": (row.get("Qfast_cha"), row.get("dVdQfast_cha")),
+                    "fast_dis": (row.get("Qfast_dis"), row.get("dVdQfast_dis")),
+                }) for row in rows]
+                for key in width_rows[0]:
+                    df_summary[key] = [width[key] for width in width_rows]
 
             # throughput column (optional)
             try:
@@ -293,14 +335,16 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             logging.exception(f"[{cell}] derived feature calc failed: {e}")
 
         # plots (optional)
-        try:
-            plot_curves(df_summary, cfg, cell, x_col="Vcha", y_col="dQdVcha", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="Qcha", y_col="dVdQcha", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="Vdis", y_col="dQdVdis", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="Qdis", y_col="dVdQdis", kmax=5, kmin=5, peak_distance=10)
-            plot_curves(df_summary, cfg, cell, x_col="VdisT", y_col="dTdV", kmax=5, kmin=5, peak_distance=10)
-        except Exception as e:
-            logging.exception(f"[{cell}] plot_curves failed: {e}")
+        if cfg.get("plots", {}).get("feature_curves", True):
+            try:
+                plot_curves(df_summary, cfg, cell, x_col="Vcha", y_col="dQdVcha", kmax=5, kmin=5, peak_distance=10)
+                plot_curves(df_summary, cfg, cell, x_col="Vdis", y_col="dQdVdis", kmax=5, kmin=5, peak_distance=10)
+                plot_curves(df_summary, cfg, cell, x_col="Vfast_cha", y_col="dQdVfast_cha",
+                            kmax=5, kmin=5, peak_distance=10)
+                plot_curves(df_summary, cfg, cell, x_col="Vfast_dis", y_col="dQdVfast_dis",
+                            kmax=5, kmin=5, peak_distance=10)
+            except Exception as e:
+                logging.exception(f"[{cell}] plot_curves failed: {e}")
 
         # drop + save (critical save should be protected too)
         # "Vcha", "dQdVcha", "Q_intVcha are taken",
@@ -308,8 +352,73 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
             df_summary = df_summary.drop(columns=[
                 "Qcha", "dVdQcha", "V_intQcha",
                 "Vdis", "dQdVdis", "Q_intVdis", "Qdis", "dVdQdis", "V_intQdis",
-                "VdisT", "dTdV", "T_intV"
+                "VdisT", "dTdV", "T_intV",
             ], errors="ignore")
+
+            # Convert curve and peak vectors to full CSV strings; otherwise
+            # NumPy's array repr truncates long traces at the print threshold.
+            array_columns = [
+                "Vcha", "dQdVcha", "Q_intVcha", "peakV_max_cha", "peakICA_max_cha",
+                "peakQ_max_cha", "peakDVA_max_cha", "peakV_min_cha", "peakICA_min_cha",
+                "peakQ_min_cha", "peakDVA_min_cha",
+                "Vfast_cha", "dQdVfast_cha", "Qfast_intV_cha",
+                "Qfast_cha", "dVdQfast_cha", "Vfast_intQ_cha",
+                "Vfast_dis", "dQdVfast_dis", "Qfast_intV_dis",
+                "Qfast_dis", "dVdQfast_dis", "Vfast_intQ_dis",
+                "peakVfast_max_cha", "peakICAfast_max_cha",
+                "peakVfast_min_cha", "peakICAfast_min_cha",
+                "peakVfast_max_dis", "peakICAfast_max_dis",
+                "peakVfast_min_dis", "peakICAfast_min_dis",
+                "R_0.2s_ohm", "R_1s_ohm", "R_10s_ohm",
+                "pulse_time_s", "pulse_voltage_V", "pulse_current_A",
+                "pulse_step_int", "pulse_events", "pulse_soc_sections", "pulse_source",
+                "qstep_fast_raw_cha", "Vfast_raw_cha", "Qfast_raw_cha",
+                "time_fast_raw_cha_s", "current_fast_raw_cha_A", "temperature_fast_raw_cha_C",
+                "qstep_fast_raw_dis", "Vfast_raw_dis", "Qfast_raw_dis",
+                "time_fast_raw_dis_s", "current_fast_raw_dis_A", "temperature_fast_raw_dis_C",
+            ]
+            for direction in ("cha", "dis"):
+                for curve_name in (
+                    f"Vfast_{direction}", f"dQdVfast_{direction}",
+                    f"Qfast_intV_{direction}", f"Qfast_{direction}",
+                    f"dVdQfast_{direction}", f"Vfast_intQ_{direction}",
+                    f"peakVfast_max_{direction}", f"peakICAfast_max_{direction}",
+                    f"peakVfast_min_{direction}", f"peakICAfast_min_{direction}",
+                ):
+                    if curve_name not in df_summary.columns:
+                        df_summary[curve_name] = [None] * len(df_summary)
+            for col in array_columns:
+                if col not in df_summary.columns:
+                    df_summary[col] = [None] * len(df_summary)
+                if col in df_summary.columns:
+                    df_summary[col] = df_summary[col].map(
+                        lambda value: repr(value.tolist()) if hasattr(value, "tolist") else value
+                    )
+
+            # Keep summary output scalar and compact; every pulse/high-rate raw
+            # sample is written separately below for lossless storage.
+            raw_trace_cols = [
+                "qstep_fast_raw_cha", "Vfast_raw_cha", "Qfast_raw_cha",
+                "time_fast_raw_cha_s", "current_fast_raw_cha_A", "temperature_fast_raw_cha_C",
+                "qstep_fast_raw_dis", "Vfast_raw_dis", "Qfast_raw_dis",
+                "time_fast_raw_dis_s", "current_fast_raw_dis_A", "temperature_fast_raw_dis_C",
+                "pulse_time_s", "pulse_voltage_V", "pulse_current_A", "pulse_step_int",
+            ]
+            raw_trace_cols = [col for col in raw_trace_cols if col in df_summary.columns]
+            if raw_trace_cols:
+                raw_dir = out_root / "raw_checkup_traces"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                for row_index, row in df_summary.iterrows():
+                    cu_time = pd.to_datetime(row.get("CU_time"), errors="coerce")
+                    stamp = cu_time.strftime("%Y%m%dT%H%M%S") if not pd.isna(cu_time) else f"{row_index:04d}"
+                    trace_path = raw_dir / f"{cell}_{stamp}.npz"
+                    trace_data = {}
+                    for col in raw_trace_cols:
+                        value = row[col]
+                        if isinstance(value, (list, tuple, np.ndarray)):
+                            trace_data[col] = np.asarray(value)
+                    np.savez_compressed(trace_path, **trace_data)
+                df_summary = df_summary.drop(columns=raw_trace_cols, errors="ignore")
 
             cell_feature_dir = out_root / "cell_feature"
             cell_feature_dir.mkdir(parents=True, exist_ok=True)
