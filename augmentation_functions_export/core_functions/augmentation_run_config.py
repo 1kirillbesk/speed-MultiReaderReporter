@@ -52,7 +52,7 @@ FEATURE_LOG2_SCALE_SCOPE = "per_cell"  # global, per_cell
 # These limits apply to feature_log2 and matching. The combined policy additionally rejects
 # generated samples above a multiple of the training-only lifetime prediction.
 FEATURE_LOG2_MAX_SCALE_POLICY = "max_var_delta_q_and_lifetime_prediction_multiplier"  # var_delta_q_only, max_var_delta_q_and_lifetime_prediction_multiplier
-FEATURE_LOG2_LIFETIME_PREDICTION_MULTIPLIER = 2.0
+FEATURE_LOG2_LIFETIME_PREDICTION_MULTIPLIER = 4.0
 FEATURE_LOG2_MAX_SCALE_REFERENCE_POLICY = "prediction_input"  # fastest_eol_throughput, prediction_input
 # Which features have to reach their test-set floor before the per-cell max-scale cap stops.
 # driver_features_only        -> the driver list (Var(Delta Q)) alone. The long-standing behaviour.

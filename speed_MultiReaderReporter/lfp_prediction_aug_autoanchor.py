@@ -4,8 +4,6 @@ import argparse
 from pathlib import Path
 import numpy as np
 
-from core_functions import augmentation_methods as core_aug
-
 from lfp_prediction_common import (
     DEFAULT_ANCHOR_SOH,
     DEFAULT_FEATURE_COLS,
@@ -16,10 +14,15 @@ from lfp_prediction_common import (
     DEFAULT_SEED_SOURCE,
     DEFAULT_TARGET_COL,
     DEFAULT_TARGET_SOH,
-    DEFAULT_TEST_NAMES,
     RAW_FEATURE_DIR,
     TrainingConfig,
+    plot_feature_log2_helper_diagnostics,
+    supported_augmentation_methods,
     run_lfp_prediction_pipeline,
+)
+
+DEFAULT_AUTOANCHOR_TEST_NAMES = tuple(
+    f"SPEED_LW_reference_{index}" for index in range(4, 7)
 )
 
 
@@ -44,21 +47,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-names",
         nargs="*",
-        default=list(DEFAULT_TEST_NAMES),
+        default=list(DEFAULT_AUTOANCHOR_TEST_NAMES),
         help="Explicit test cells. If none of them exist, the script falls back to all *reference* cells.",
     )
     parser.add_argument(
         "--augmentation-method",
-        choices=core_aug.VALID_AUGMENTATION_METHODS,
-        default="normal",
+        choices=supported_augmentation_methods(),
+        default="feature_log2",
     )
     parser.add_argument(
         "--augmentation-sample-count",
         type=int,
         default=None,
         help=(
-            "Used by CAL/HYBRID/CODEX augmentation. NORMAL is the default here and augments "
-            "the real training group with multiple scale factors."
+            "Optional augmentation count (method-dependent)."
         ),
     )
     parser.add_argument("--anchor-week", type=float, default=DEFAULT_INPUT_END_WEEK)
@@ -100,6 +102,19 @@ def main() -> None:
             f"{('throughput ' + format(float(args.anchor_throughput), '.6g')) if str(args.anchor_mode) == 'throughput' else ('week ' + format(float(args.anchor_week), '.0f'))} cutoff"
         ),
     )
+
+    if str(args.augmentation_method) == "feature_log2":
+        figure_path = Path(args.data_dir).parent / "lfp_prediction_aug_autoanchor" / "var_delta_Q_helper_fit.png"
+        plot_feature_log2_helper_diagnostics(
+            train_real_cells=result["train_real_cells"],
+            augmented_cells=result["augmented_cells"],
+            test_cells=result["test_cells_data"],
+            metadata=result["metadata"],
+            title_prefix="LFP feature_log2 augmentation",
+            show=False,
+            output_path=figure_path,
+        )
+        print(f"var_delta_Q helper fit: {figure_path}")
 
     metadata = dict(result["metadata"])
     prediction_df = result["prediction_df"]

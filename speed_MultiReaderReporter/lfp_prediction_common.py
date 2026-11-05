@@ -4,6 +4,13 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 import random
+import sys
+
+# PyCharm runs this file's entry points with speed_MultiReaderReporter/ first on
+# sys.path. The actual core_functions package is in the sibling export folder.
+_EXPORT_DIR = Path(__file__).resolve().parent.parent / "augmentation_functions_export"
+if str(_EXPORT_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXPORT_DIR))
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,15 +23,10 @@ from sklearn.preprocessing import StandardScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 
-from core_functions import TinyTemporalCNN, augmentation_methods as core_aug
+from core_functions import augmentation_methods as core_aug
 from core_functions import augmentation_run_config as exported_aug_cfg
-from core_functions.autoanchor_policy import build_anchor_candidates, select_lowest_valid_anchor
-from core_functions.temporal_models import build_regression_loss
-from core_functions.training_seeds import build_model_training_seed_list
-from exported_core_functions import (
-    get_exported_augmentation_methods_module,
-    get_exported_temporal_models_module,
-)
+from core_functions.temporal_models import TinyTemporalCNN, build_regression_loss
+from core_functions.augmentation_run_config import build_model_training_seed_list
 
 
 HERE = Path(__file__).resolve().parent
@@ -58,11 +60,22 @@ DEFAULT_AUTOANCHOR_MIN_SOH = 0.80
 DEFAULT_AUTOANCHOR_MAX_SOH = 0.99
 DEFAULT_AUTOANCHOR_STEP_SOH = 0.01
 DEFAULT_EXEMPT_FROM_SCALING = ("SOH",)
-DEFAULT_AUGMENTATION_METHOD = str(core_aug.DEFAULT_AUTOANCHOR_AUGMENTATION_METHOD).strip().lower()
-DEFAULT_CAL_AUGMENTATION_SAMPLE_COUNT = int(core_aug.DEFAULT_CAL_AUGMENTATION_SAMPLE_COUNT)
-DEFAULT_HYBRID_AUGMENTATION_SAMPLE_COUNT = int(core_aug.DEFAULT_HYBRID_AUGMENTATION_SAMPLE_COUNT)
-DEFAULT_CODEX_AUGMENTATION_SAMPLE_COUNT = int(core_aug.DEFAULT_CODEX_AUGMENTATION_SAMPLE_COUNT)
-LOCAL_AUGMENTATION_METHODS = tuple(str(name).strip().lower() for name in core_aug.VALID_AUGMENTATION_METHODS)
+DEFAULT_AUGMENTATION_METHOD = str(exported_aug_cfg.DEFAULT_AUGMENTATION_METHOD).strip().lower()
+DEFAULT_CAL_AUGMENTATION_SAMPLE_COUNT = 0
+DEFAULT_HYBRID_AUGMENTATION_SAMPLE_COUNT = 0
+DEFAULT_CODEX_AUGMENTATION_SAMPLE_COUNT = 0
+# The exported package supports feature_log2/matching; the legacy local
+# normal/CAL/HYBRID/CODEX implementations are not part of this checkout.
+LOCAL_AUGMENTATION_METHODS: tuple[str, ...] = ()
+
+
+def get_exported_augmentation_methods_module():
+    return core_aug
+
+
+def get_exported_temporal_models_module():
+    from core_functions import temporal_models
+    return temporal_models
 PREDICTION_MODEL_LEGACY_TCNN = "legacy_tcnn"
 PREDICTION_MODEL_EXPORTED_EOL_TCNN = "exported_eol_tcnn"
 PREDICTION_MODEL_EXPORTED_EOL_MLP = "exported_eol_mlp"
@@ -86,6 +99,18 @@ CAPACITY_COLUMN = "cap_ocv_dis"
 CAPACITY_FALLBACK_COLUMNS = ("cap_ocv_dis", "cap_ocv_cha", "cap_dis", "cap_cha")
 THROUGHPUT_COLUMN = "throughput_cum"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def build_anchor_candidates(*, min_soh: float, max_soh: float,
+                            step_soh: float, descending: bool = False) -> list[float]:
+    """Build a stable inclusive grid for SOH-anchor selection."""
+    if step_soh <= 0 or min_soh > max_soh:
+        raise ValueError("Invalid SOH anchor range or step")
+    count = int(np.floor((max_soh - min_soh) / step_soh + 1e-9))
+    candidates = [float(min_soh + i * step_soh) for i in range(count + 1)]
+    if candidates[-1] < max_soh - 1e-9:
+        candidates.append(float(max_soh))
+    return candidates[::-1] if descending else candidates
 
 
 @dataclass(frozen=True)
@@ -773,25 +798,20 @@ def select_autoanchor_soh(
     step_soh: float = DEFAULT_AUTOANCHOR_STEP_SOH,
 ) -> tuple[float, pd.DataFrame]:
     candidates = build_anchor_candidates(
-        min_soh=float(min_soh),
-        max_soh=float(max_soh),
-        step_soh=float(step_soh),
+        min_soh=float(min_soh), max_soh=float(max_soh), step_soh=float(step_soh),
         descending=False,
     )
-
-    def evaluate(candidate_soh: float) -> tuple[bool, list[dict[str, object]]]:
-        return evaluate_anchor_candidate(
-            cell_frames,
-            anchor_soh=float(candidate_soh),
-            input_steps=int(input_steps),
+    search = []
+    for candidate in candidates:
+        valid, details = evaluate_anchor_candidate(
+            cell_frames, anchor_soh=float(candidate), input_steps=int(input_steps),
         )
-
-    selected_anchor, search_df = select_lowest_valid_anchor(
-        candidates=candidates,
-        evaluate_candidate=evaluate,
-        require_scan_all=False,
-    )
-    return float(selected_anchor), search_df
+        search.append({"anchor_soh": float(candidate), "valid": bool(valid),
+                       "usable_count": sum(row["status"] == "ok" for row in details),
+                       "total_count": len(details)})
+        if valid:
+            return float(candidate), pd.DataFrame(search)
+    raise ValueError("No valid SOH anchor in the requested range")
 
 
 def select_balanced_anchor_soh(
@@ -2452,18 +2472,9 @@ def plot_feature_log2_helper_diagnostics(
         else 0.0
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
 
     axes[0].scatter(x_train, train_y_log, color="steelblue", alpha=0.8, s=32, label="Train actual")
-    if augmented_x_log.size:
-        axes[0].scatter(
-            augmented_x_log,
-            augmented_y_log,
-            color="seagreen",
-            alpha=0.45,
-            s=18,
-            label="Augmented",
-        )
     axes[0].scatter(x_test, test_actual_log, color="coral", alpha=0.95, s=58, marker="D", label="Test actual")
     axes[0].scatter(x_test, test_pred_log, color="teal", alpha=0.95, s=48, marker="s", label="Test predicted")
     axes[0].plot(x_grid, y_grid, color="black", linewidth=1.6, label="Helper fit")
@@ -2479,8 +2490,10 @@ def plot_feature_log2_helper_diagnostics(
     for x_value, y_value, name in zip(x_test, test_actual_log, valid_test_names):
         axes[0].annotate(name, (x_value, y_value), xytext=(4, 4), textcoords="offset points", fontsize=8, color="coral")
     axes[0].set_xlabel(f"log(|{helper_feature}|) at {helper_reference_column} cutoff")
+    # The helper regression targets cell["target_value"], which is weeks to
+    # EOL even when the input feature was sampled at a throughput cutoff.
     axes[0].set_ylabel("log(weeks to target SOH)")
-    axes[0].set_title("Log-domain helper model")
+    axes[0].set_title("Helper fit (real cells only)")
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
@@ -2494,15 +2507,6 @@ def plot_feature_log2_helper_diagnostics(
     raw_y_grid = np.exp(y_grid)
     raw_y_grid_upper = np.exp(y_grid_upper)
     axes[1].scatter(raw_x_train, raw_y_train, color="steelblue", alpha=0.8, s=32, label="Train actual")
-    if augmented_x_log.size:
-        axes[1].scatter(
-            np.exp(augmented_x_log),
-            np.exp(augmented_y_log),
-            color="seagreen",
-            alpha=0.45,
-            s=18,
-            label="Augmented",
-        )
     axes[1].scatter(raw_x_test, raw_y_test, color="coral", alpha=0.95, s=58, marker="D", label="Test actual")
     axes[1].scatter(raw_x_test, raw_pred_test, color="teal", alpha=0.95, s=48, marker="s", label="Test predicted")
     axes[1].plot(raw_x_grid, raw_y_grid, color="black", linewidth=1.6, label="Helper fit")
@@ -2522,15 +2526,35 @@ def plot_feature_log2_helper_diagnostics(
     axes[1].set_yscale("log")
     axes[1].set_xlabel(f"|{helper_feature}| at {helper_reference_column} cutoff")
     axes[1].set_ylabel("Weeks to target SOH")
-    axes[1].set_title("Raw-domain view")
+    axes[1].set_title("Same fit in original units")
     axes[1].grid(True, which="both", alpha=0.3)
     axes[1].legend()
+
+    # Augmented samples were generated after fitting the helper regression.
+    # They are not observations used to fit the black line. Show their range
+    # separately so hundreds of synthetic points cannot obscure the fit.
+    if augmented_x_log.size:
+        axes[2].hexbin(augmented_x_log, augmented_y_log, gridsize=38,
+                       mincnt=1, cmap="Greens", linewidths=0)
+        axes[2].scatter(x_train, train_y_log, color="steelblue", s=12,
+                        alpha=0.65, label="Real training cells")
+        axes[2].plot(x_grid, y_grid, color="black", linewidth=1.3,
+                     label="Real-cell helper fit")
+        axes[2].legend(fontsize=8)
+    else:
+        axes[2].text(0.5, 0.5, "No generated samples", ha="center", va="center",
+                     transform=axes[2].transAxes)
+    axes[2].set_xlabel(f"log(|{helper_feature}|) at {helper_reference_column} cutoff")
+    axes[2].set_ylabel("log(weeks to target SOH)")
+    axes[2].set_title(f"Generated samples only (n={augmented_x_log.size})")
+    axes[2].grid(True, alpha=0.2)
 
     max_scale = float(metadata.get("max_augmentation_scale", np.nan))
     scale_count = len(list(metadata.get("augmentation_scales", []) or []))
     fig.suptitle(
         f"{title_prefix}: feature_log2 helper model\n"
-        f"feature={helper_feature}, multiplier={multiplier:g}, max_scale={max_scale:.3f}, scale_count={scale_count}",
+        f"feature={helper_feature}, prediction boundary={multiplier:g}x, "
+        f"feature scale cap={max_scale:.3f}, factors={scale_count}",
         fontsize=12,
     )
     fig.tight_layout()
