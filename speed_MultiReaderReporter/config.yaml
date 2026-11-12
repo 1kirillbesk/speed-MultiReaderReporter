@@ -1,13 +1,18 @@
 # speed_MultiReaderReporter/config.yaml
 
 input:
-  path: "C:/Users/rul/SARLFP/hakad/raw_data_csv"     #"C:/Users/Public/Documents/takedata/Speed/raw_data_csv"      # folder OR single file; detector will recurse if it's a folder
+  path: "E:/download/hkd/raw_data_csv"     # folder OR single file; detector will recurse if it's a folder
   recurse: true
-  name_contains: ["dlu_HKD", "rul_hk"]
+  name_contains: ["HKD"]
 # C:/Users/Public/Documents/example_reporter
 # C:/Users/Public/Documents/takedata/Speed/
 output:
-  root: "C:/Users/rul/SARLFP/hakad/out_hk"           # main pipeline will create per-cell subfolders under here
+  root: "E:/download/hkd/out_hkd"           # main pipeline will create per-cell subfolders under here
+
+processing:
+  # all = rebuild every discovered cell; unprocessed = only cells with new/changed source files
+  mode: "all"
+  manifest: "processing_manifest.json"      # stored under output.root
 
 reports:
   format: "csv"    # one of: csv | mat | both
@@ -16,6 +21,8 @@ reports:
 classification:
   cycling_keywords: ["cyc"]              # force cycling when present in program name
   checkup_keywords: ["check_up", "lw_rpt","qocv"]
+  standalone_checkup_keywords: ["check_up"]
+  checkup_export_keywords: ["check_up", "rpt", "qocv"]
   duration_threshold_minutes: 60    # < 1h → checkup
   rpt_keywords: ["check_up","lw_cu","qocv"]
   cu_keyword: "qocv"

@@ -13,17 +13,16 @@ from .pulses import *
 from .soh import cumulative_throughput_until
 from .model import RunRecord
 from .grouping import prepare_grouping, compute_grouped_segments
+from .hkd_checkups import write_hkd_checkup_exports
 import re
 
-log_path = Path('C:/Users/rul/SARLFP/hakad/out_hk') / "errors.log"
-#C:/Users/Public/Documents/takedata/Speed/out_lw
-logging.basicConfig(
-    filename=str(log_path),
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
+    out_root.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        filename=str(out_root / "errors.log"),
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
     configure_from_config(cfg)
     volt_lim = cfg.get("voltage")
@@ -47,6 +46,21 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         except Exception as e:
             logging.exception(f"[{cell}] Failed while splitting total_list: {e}")
             continue
+
+        try:
+            checkup_keywords = cfg.get("classification", {}).get(
+                "checkup_export_keywords", []
+            )
+            exports = write_hkd_checkup_exports(
+                cell,
+                [run for run in runs if run.cell == cell],
+                cell_dir / "checkup",
+                checkup_keywords,
+            )
+            if exports:
+                logging.info("[%s] wrote HKD checkup summary/step exports: %s", cell, exports)
+        except Exception as e:
+            logging.exception(f"[{cell}] HKD checkup sequence/summary export failed: {e}")
 
         # --- plots (non-critical) ---
         try:

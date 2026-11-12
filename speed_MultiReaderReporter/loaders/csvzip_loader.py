@@ -52,7 +52,14 @@ def _df_from_csv_bytes(buff: bytes) -> pd.DataFrame:
     cols["qcha"] = to_float(df["AhLad"])
     cols["qdis"] = to_float(df["AhEla"])
     cols["qstep"] = to_float(df["AhStep"])
-    cols["T1"] = to_float(df["Tcan"])
+    # Older HKD exports call the primary temperature channel Tcan; newer
+    # exports label it T1. Temperature is optional to the main data pipeline.
+    temperature_col = next(
+        (c for c in df.columns if str(c).strip().lower() in {"tcan", "t1", "temperatur"}),
+        None,
+    )
+    if temperature_col is not None:
+        cols["T1"] = to_float(df[temperature_col])
     out = pd.DataFrame(cols).dropna(subset=["abs_time", "current_A"]).sort_values("abs_time")
     return out.reset_index(drop=True)
 

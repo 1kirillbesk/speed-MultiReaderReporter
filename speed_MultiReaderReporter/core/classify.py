@@ -62,6 +62,10 @@ def split_total_list(cell, total_list,cfg):
     # keywords
     rpt_keywords = tuple(cfg["classification"]["rpt_keywords"])   # checkups defined ONLY by these in pairing mode
     cu_keyword = cfg["classification"]["cu_keyword"]         # normal mode checkup marker
+    standalone_checkup_keywords = tuple(
+        str(keyword).lower()
+        for keyword in cfg["classification"].get("standalone_checkup_keywords", [])
+    )
 
     n = len(total_list)
 
@@ -77,6 +81,13 @@ def split_total_list(cell, total_list,cfg):
     while i < n:
         df, label = total_list[i]
         label_lower = (label or "").lower()
+
+        # Some datasets export the complete checkup as its own procedure/file.
+        # Keep these independent rather than pairing them with the preceding run.
+        if any(keyword in label_lower for keyword in standalone_checkup_keywords):
+            checkup_list.append((df, label))
+            i += 1
+            continue
 
         # -------------------------
         # MODE A: Pair lw_rpt with immediately previous item
@@ -133,7 +144,8 @@ def split_total_list(cell, total_list,cfg):
         indices_before_rpt = set()
         for idx in range(1, n):
             lbl = (total_list[idx][1] or "").lower()
-            if any(k in lbl for k in rpt_keywords):
+            is_standalone_checkup = any(k in lbl for k in standalone_checkup_keywords)
+            if not is_standalone_checkup and any(k in lbl for k in rpt_keywords):
                 indices_before_rpt.add(idx - 1)
 
         # rebuild cycling_list based on original order + indices to exclude
