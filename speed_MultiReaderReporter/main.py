@@ -90,6 +90,23 @@ def should_process_cell(cell_id: str,
 
     current_inputs = build_item_manifest(items)
     summary_path = _summary_path_for_cell(out_root, cell_id)
+    checkup_dir = out_root / cell_id / "checkup"
+    sequence_dir = checkup_dir / "sequences"
+    has_checkup_named_inputs = any(
+        any(keyword in item.path.name.lower() for keyword in ("rpt", "_cu", "cu_", "qocv"))
+        for item in items
+    )
+    sequence_exports_missing = (
+        has_checkup_named_inputs
+        and
+        (checkup_dir / "report.csv").exists()
+        and not any(sequence_dir.glob("*_sequence.csv"))
+    )
+
+    # Roll out the full-sample CSV export for existing cells without treating
+    # healthy cached cells as requiring a full refresh on subsequent runs.
+    if sequence_exports_missing and cache_mode == CACHE_MODE_SUMMARY_ONLY:
+        return True, "checkup sequence CSV exports are missing", False
 
     if cache_mode == CACHE_MODE_FULL_RAW_PLOTS:
         return True, "existing_cell_mode forces full raw reload", False

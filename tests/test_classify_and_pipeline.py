@@ -60,10 +60,12 @@ class PipelineGroupingTests(unittest.TestCase):
             total_report = cell_dir / "total" / "report.csv"
             cycling_report = cell_dir / "cycling" / "report.csv"
             checkup_report = cell_dir / "checkup" / "report.csv"
+            checkup_sequences = list((cell_dir / "checkup" / "sequences").glob("*_sequence.csv"))
 
             self.assertTrue(total_report.exists(), "total report missing")
             self.assertTrue(cycling_report.exists(), "cycling report missing")
             self.assertTrue(checkup_report.exists(), "checkup report missing")
+            self.assertEqual(1, len(checkup_sequences), "full checkup sequence missing")
 
             # Ensure both runs appear in the total report (plus TOTAL row)
             df_total = pd.read_csv(total_report)
@@ -76,6 +78,12 @@ class PipelineGroupingTests(unittest.TestCase):
             # Ensure checkup run grouped correctly
             df_chk = pd.read_csv(checkup_report)
             self.assertIn("demo_cu", df_chk["program"].tolist())
+
+            sequence = pd.read_csv(checkup_sequences[0])
+            self.assertEqual(len(checkup_df), len(sequence))
+            self.assertIn("voltage_V", sequence.columns)
+            self.assertIn("current_A", sequence.columns)
+            self.assertEqual(0.0, sequence["relative_time_s"].iloc[0])
 
 
 class ProcedureSegmentationTests(unittest.TestCase):

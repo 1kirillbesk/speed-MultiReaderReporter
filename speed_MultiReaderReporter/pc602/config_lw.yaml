@@ -8,7 +8,7 @@ input:
 # C:/Users/Public/Documents/example_reporter
 # C:/Users/Public/Documents/takedata/Speed/
 output:
-  root: "C:/Users/Public/Documents/takedata/Speed/out_lw"           # main pipeline will create per-cell subfolders under here
+  root: "E:/download/SPEED/out_lw"           # main pipeline will create per-cell subfolders under here
 
 reports:
   format: "csv"    # one of: csv | mat | both

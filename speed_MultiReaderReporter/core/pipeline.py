@@ -5,6 +5,7 @@ from pathlib import Path
 import logging
 import pandas as pd
 import matplotlib.pyplot as plt
+import re
 from .classify import *
 from .plotting import *
 from .reports import write_report, write_grouped_report
@@ -46,6 +47,45 @@ def _mask_contains_any(series: pd.Series, keywords: tuple[str, ...]) -> pd.Serie
         mask = mask | lowered.str.contains(kw, case=False, na=False, regex=False)
     return mask
 
+
+def _safe_export_stem(label: str, fallback: str = "checkup") -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(label)).strip("_")
+    return stem[:140] or fallback
+
+
+def export_checkup_sequences(checkup_list, output_dir: Path) -> list[Path]:
+    """Write full normalized time/current/voltage/step records for checkups."""
+    if not checkup_list:
+        return []
+    sequence_dir = output_dir / "sequences"
+    sequence_dir.mkdir(parents=True, exist_ok=True)
+    occurrence_counts = Counter(label for _, label in checkup_list)
+    occurrence_seen: defaultdict[str, int] = defaultdict(int)
+    written = []
+    export_columns = [
+        "abs_time", "relative_time_s", "current_A", "voltage_V", "step_int", "state",
+        "procedure", "qcha", "qdis", "qstep", "T1",
+    ]
+    for frame, label in checkup_list:
+        if frame.empty:
+            continue
+        occurrence_seen[label] += 1
+        occurrence = occurrence_seen[label]
+        safe_label = _safe_export_stem(label)
+        suffix = f"_{occurrence:02d}" if occurrence_counts[label] > 1 else ""
+        output_path = sequence_dir / f"{safe_label}{suffix}_sequence.csv"
+
+        data = frame.copy()
+        data["abs_time"] = pd.to_datetime(data["abs_time"], errors="coerce")
+        data = data.dropna(subset=["abs_time"]).sort_values("abs_time").reset_index(drop=True)
+        if data.empty:
+            continue
+        data["relative_time_s"] = (data["abs_time"] - data["abs_time"].iloc[0]).dt.total_seconds()
+        columns = [column for column in export_columns if column in data.columns]
+        data.loc[:, columns].to_csv(output_path, index=False)
+        written.append(output_path)
+    return written
+
 def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
     legend_ncol = int(cfg.get("legend", {}).get("ncol", 4))
     configure_from_config(cfg)
@@ -72,6 +112,14 @@ def run_pipeline(runs: list[RunRecord], cfg: dict, out_root: Path):
         except Exception as e:
             logging.exception(f"[{cell}] Failed while splitting total_list: {e}")
             continue
+
+        # Preserve sample-level checkup signals alongside aggregate reports/plots.
+        try:
+            sequence_paths = export_checkup_sequences(checkup_list, cell_dir / "checkup")
+            if sequence_paths:
+                logging.info("[%s] exported %d full checkup sequences", cell, len(sequence_paths))
+        except Exception as e:
+            logging.exception(f"[{cell}] Failed to export checkup sequences: {e}")
 
         # --- plots (non-critical) ---
         try:
